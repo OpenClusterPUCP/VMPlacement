@@ -1438,126 +1438,7 @@ class SliceBasedPlacementSolver:
             return
         
         Logger.section("Visualización del Placement")
-
-        # Si se proporciona la respuesta del API, usar esos datos para visualización
-        if api_response and 'content' in api_response and 'resource_usage' in api_response['content']:
-            # Extraer datos del API para visualización
-            servers_data = {}
-            server_usage = {}
-            vm_details = []
-            
-            # Mapeo de servidores por su ID
-            api_servers = {}
-            for server in api_response['content']['resource_usage']['servers']:
-                api_servers[server['id']] = server
-                
-            # Extraer asignaciones de VMs
-            for assignment in api_response['content']['assignments']:
-                vm_details.append({
-                    "vm_id": assignment['vm_id'],
-                    "vm_name": assignment['vm_name'],
-                    "server_id": assignment['server_id'],
-                    "server_name": assignment['server_name']
-                })
-                
-            # Crear estructura de uso de recursos desde el API
-            for server in api_response['content']['resource_usage']['servers']:
-                server_id = server['id']
-                server_usage[server_id] = {
-                    "server_name": server['name'],
-                    "vcpus": {
-                        "used": server['resources']['vcpus']['used'],
-                        "total": server['resources']['vcpus']['total'],
-                        "percent": server['resources']['vcpus']['percent']
-                    },
-                    "ram": {
-                        "used": server['resources']['ram']['used'],
-                        "total": server['resources']['ram']['total'],
-                        "percent": server['resources']['ram']['percent']
-                    },
-                    "disk": {
-                        "used": server['resources']['disk']['used'],
-                        "total": server['resources']['disk']['total'],
-                        "percent": server['resources']['disk']['percent']
-                    },
-                    "vms": server['vms_count']
-                }
-        else:
-            # Usar el enfoque original para calcular recursos cuando no hay respuesta API
-            # Crear un mapa de servidores a VMs asignadas
-            server_to_vms = {}
-            for vm_id, server_id in result.assignments.items():
-                if server_id not in server_to_vms:
-                    server_to_vms[server_id] = []
-                server_to_vms[server_id].append(vm_id)
-            
-            # Calcular uso de recursos por servidor
-            server_usage = {}
-            # Información detallada de las VMs para gráfica adicional
-            vm_details = []
-            
-            for server_id, vm_ids in server_to_vms.items():
-                # Buscar el objeto servidor
-                server = next((s for s in self.servers if s.id == server_id), None)
-                if not server:
-                    continue
-                    
-                vcpus_used = 0
-                ram_used = 0
-                disk_used = 0.0
-                
-                for vm_id in vm_ids:
-                    # Buscar el objeto VM en self.slice.vms en lugar de self.vms
-                    vm = next((v for v in self.slice.vms if v.id == vm_id), None)
-                    if not vm:
-                        continue
-                        
-                    vcpus_used += vm.flavor.vcpus
-                    ram_used += vm.flavor.ram
-                    disk_used += vm.flavor.disk
-                    
-                    # Guardar información detallada de la VM para la gráfica adicional
-                    vm_details.append({
-                        "vm_id": vm_id,
-                        "vm_name": vm.name,
-                        "server_id": server_id,
-                        "server_name": server.name,
-                        "vcpus": vm.flavor.vcpus,
-                        "ram": vm.flavor.ram,
-                        "disk": vm.flavor.disk
-                    })
-                
-                # Calcular para ESTE servidor, no sobreescribir con el último
-                total_vcpus_used = server.used_vcpus + vcpus_used
-                total_ram_used = server.used_ram + ram_used
-                total_disk_used = server.used_disk + disk_used
-                
-                # Limitar los valores para no exceder el 100% de uso
-                total_vcpus_percent = min(100, (total_vcpus_used / server.total_vcpus * 100)) if server.total_vcpus > 0 else 0
-                total_ram_percent = min(100, (total_ram_used / server.total_ram * 100)) if server.total_ram > 0 else 0
-                total_disk_percent = min(100, (total_disk_used / server.total_disk * 100)) if server.total_disk > 0 else 0
-                
-                server_usage[server_id] = {
-                    "server_name": server.name,
-                    "vcpus": {
-                        "used": total_vcpus_used,
-                        "total": server.total_vcpus,
-                        "percent": total_vcpus_percent
-                    },
-                    "ram": {
-                        "used": total_ram_used,
-                        "total": server.total_ram,
-                        "percent": total_ram_percent
-                    },
-                    "disk": {
-                        "used": total_disk_used,
-                        "total": server.total_disk,
-                        "percent": total_disk_percent
-                    },
-                    "vms": len(vm_ids)
-                }
         
-        # Crear gráficos para visualizar la asignación y guardarlos como imagen
         try:
             import matplotlib
             matplotlib.use('Agg') 
@@ -1578,12 +1459,108 @@ class SliceBasedPlacementSolver:
             timestamp_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             filename = os.path.join(results_dir, f'resultado_{timestamp}.png')
             
+            # Extraer datos para visualización
+            vm_details = []
+            server_usage = {}
+            
+            # Debug para ver qué contiene api_response
+            if api_response:
+                Logger.debug(f"API response keys: {list(api_response.keys())}")
+                if 'content' in api_response:
+                    Logger.debug(f"API content keys: {list(api_response['content'].keys())}")
+
+            # Procesar datos según la fuente disponible
+            if api_response and 'content' in api_response:
+                # Usar datos de la respuesta de API
+                api_content = api_response['content']
+                
+                # Verificar si hay asignaciones en la respuesta
+                if 'assignments' in api_content and len(api_content['assignments']) > 0:
+                    # Extraer asignaciones de VMs a servidores
+                    for assignment in api_content['assignments']:
+                        vm_id = assignment['vm_id']
+                        vm_name = assignment['vm_name']
+                        server_id = assignment['server_id']
+                        server_name = assignment['server_name']
+                        
+                        # Buscar información de recursos de la VM
+                        vm_info = None
+                        for vm in self.slice.vms:
+                            if vm.id == vm_id:
+                                vm_info = {
+                                    "vcpus": vm.flavor.vcpus,
+                                    "ram": vm.flavor.ram,
+                                    "disk": vm.flavor.disk
+                                }
+                                break
+                        
+                        if vm_info:
+                            vm_details.append({
+                                "vm_id": vm_id,
+                                "vm_name": vm_name,
+                                "server_id": server_id,
+                                "server_name": server_name,
+                                "vcpus": vm_info["vcpus"],
+                                "ram": vm_info["ram"],
+                                "disk": vm_info["disk"]
+                            })
+                        else:
+                            # Si no encontramos la info, usar valores predeterminados
+                            vm_details.append({
+                                "vm_id": vm_id,
+                                "vm_name": vm_name,
+                                "server_id": server_id,
+                                "server_name": server_name,
+                                "vcpus": 1,  # valor por defecto
+                                "ram": 1024,  # valor por defecto
+                                "disk": 10.0  # valor por defecto
+                            })
+                    
+                    # Extraer información de uso de recursos por servidor
+                    if 'resource_usage' in api_content and 'servers' in api_content['resource_usage']:
+                        for server in api_content['resource_usage']['servers']:
+                            server_id = server['id']
+                            server_usage[server_id] = {
+                                "server_name": server['name'],
+                                "vcpus": {
+                                    "used": server['resources']['vcpus']['used'],
+                                    "total": server['resources']['vcpus']['total'],
+                                    "percent": server['resources']['vcpus']['percent']
+                                },
+                                "ram": {
+                                    "used": server['resources']['ram']['used'],
+                                    "total": server['resources']['ram']['total'],
+                                    "percent": server['resources']['ram']['percent']
+                                },
+                                "disk": {
+                                    "used": server['resources']['disk']['used'],
+                                    "total": server['resources']['disk']['total'],
+                                    "percent": server['resources']['disk']['percent']
+                                },
+                                "vms": server['vms_count']
+                            }
+                else:
+                    # No hay asignaciones en la respuesta API, usar la información local
+                    Logger.warning("No hay asignaciones en la respuesta API, reconstruyendo datos")
+                    self._extract_placement_data_from_result(result, vm_details, server_usage)
+            else:
+                # No hay respuesta API, usar datos locales
+                Logger.info("No hay datos de API disponibles, usando datos calculados localmente")
+                self._extract_placement_data_from_result(result, vm_details, server_usage)
+            
+            # Verificar que tenemos datos para visualizar
+            if not vm_details or not server_usage:
+                Logger.error("No hay datos suficientes para visualizar")
+                Logger.debug(f"vm_details: {vm_details}")
+                Logger.debug(f"server_usage: {server_usage}")
+                return
+            
             # Crear figura más grande para incluir 4 gráficos
             fig = plt.figure(figsize=(16, 12))
             fig.text(0.5, 0.02, f"Generado: {timestamp_text}", 
                     ha='center', fontsize=8, style='italic', color='gray')
 
-            # Configurar subplots: 2 filas, 2 columnas
+            # Configurar subplots
             ax1 = plt.subplot2grid((2, 2), (0, 0))  # vCPUs
             ax2 = plt.subplot2grid((2, 2), (0, 1))  # RAM
             ax3 = plt.subplot2grid((2, 2), (1, 0))  # Disco
@@ -1593,7 +1570,7 @@ class SliceBasedPlacementSolver:
             server_ids = sorted(server_usage.keys())
             server_names = [server_usage[sid]["server_name"] for sid in server_ids]
             
-            # Graficar uso de vCPUs usando API data
+            # Graficar uso de vCPUs
             cpu_used = [server_usage[sid]["vcpus"]["used"] for sid in server_ids]
             cpu_total = [server_usage[sid]["vcpus"]["total"] for sid in server_ids]
             
@@ -1605,7 +1582,7 @@ class SliceBasedPlacementSolver:
             ax1.legend()
             ax1.grid(True, linestyle='--', alpha=0.7)
             
-            # Graficar uso de RAM en GB usando API data
+            # Graficar uso de RAM en GB
             ram_used = [server_usage[sid]["ram"]["used"] / 1024 for sid in server_ids]  # Convertir a GB
             ram_total = [server_usage[sid]["ram"]["total"] / 1024 for sid in server_ids]  # Convertir a GB
             
@@ -1617,7 +1594,7 @@ class SliceBasedPlacementSolver:
             ax2.legend()
             ax2.grid(True, linestyle='--', alpha=0.7)
             
-            # Graficar uso de Disco usando API data
+            # Graficar uso de Disco
             disk_used = [server_usage[sid]["disk"]["used"] for sid in server_ids]
             disk_total = [server_usage[sid]["disk"]["total"] for sid in server_ids]
             
@@ -1629,192 +1606,235 @@ class SliceBasedPlacementSolver:
             ax3.legend()
             ax3.grid(True, linestyle='--', alpha=0.7)
             
-            # Visualización de asignación de VMs a servidores
+            # ---- GRAFICAR ASIGNACIÓN DE VMs (CUARTA GRÁFICA - CORREGIDA) ----
+            
             ax4.set_title('Asignación de VMs a Servidores', fontsize=14, fontweight='bold')
             ax4.set_xlabel('Servidores', fontsize=12)
             ax4.set_ylabel('Recursos Asignados (%)', fontsize=12)
             ax4.grid(True, linestyle='--', alpha=0.7)
             
-            # Organizar las VMs por servidor
+            # Agrupar VMs por servidor
             servers_vm_map = {}
             for vm in vm_details:
                 server_name = vm["server_name"]
                 if server_name not in servers_vm_map:
                     servers_vm_map[server_name] = []
                 servers_vm_map[server_name].append(vm)
-
-            # Ordenar nombres de servidores para la visualización
-            visualization_server_names = sorted(servers_vm_map.keys())
             
-            # Definir colores para cada tipo de recurso
-            color_vcpus = '#4287f5'  # Azul para vCPUs
-            color_ram = '#42f584'    # Verde para RAM
-            color_disk = '#f54242'   # Rojo para Disco
-            
-            # Crear barras para la gráfica de asignación
-            bar_width = 0.25
-            positions = np.arange(len(visualization_server_names))
-            
-            # Configurar tipos de recursos y sus colores
-            resource_types = ['vCPUs', 'RAM', 'Disco']
-            resource_colors = [color_vcpus, color_ram, color_disk]
-            resource_positions = [-1, 0, 1]  # Posición relativa de cada barra
-            
-            # Crear leyenda para tipos de recursos
-            legend_elements = [
-                plt.Rectangle((0,0), 1, 1, color=color_vcpus, label='vCPUs'),
-                plt.Rectangle((0,0), 1, 1, color=color_ram, label='RAM'),
-                plt.Rectangle((0,0), 1, 1, color=color_disk, label='Disk')
-            ]
-            ax4.legend(handles=legend_elements, loc='upper right', title='Tipos de Recursos',
-                    fontsize=10, title_fontsize=11, framealpha=0.9, facecolor='white',
-                    edgecolor='gray', fancybox=True, shadow=True)
-            
-            # Para cada tipo de recurso, generar gráfico de barras porcentual
-            for i, (resource_type, color, position) in enumerate(zip(resource_types, resource_colors, resource_positions)):
-                for server_idx, server_name in enumerate(visualization_server_names):
-                    x_pos = positions[server_idx] + position * bar_width
-                    server_id = next((sid for sid in server_ids if server_usage[sid]["server_name"] == server_name), None)
-                    
-                    if server_id is None:
-                        continue
-                    
-                    # Obtener el porcentaje directamente del API
-                    if resource_type == 'vCPUs':
-                        percent_used = server_usage[server_id]["vcpus"]["percent"]
-                    elif resource_type == 'RAM':
-                        percent_used = server_usage[server_id]["ram"]["percent"]
-                    else:  # Disco
-                        percent_used = server_usage[server_id]["disk"]["percent"]
-                    
-                    # Dibujar barra con el porcentaje exacto del API (sin recalcular)
-                    ax4.bar(x_pos, percent_used, bar_width, 
-                            bottom=0, color=color, alpha=0.6)
-                    
-                    # Etiquetar las VMs en cada servidor si hay suficiente espacio
-                    vms_in_server = servers_vm_map.get(server_name, [])
-                    
-                    # Si hay VMs en este servidor, mostrar etiquetas
-                    if vms_in_server:
-                        for j, vm in enumerate(vms_in_server):
-                            vm_name = vm["vm_name"]
-                            # Calcular posición para la etiqueta
-                            y_pos = percent_used * (0.5 + j*0.4)  # Distribuir las etiquetas
-                            
-                            if percent_used > 15:  # Solo mostrar etiqueta si hay suficiente espacio
-                                ax4.text(x_pos, min(y_pos, percent_used * 0.9), vm_name, 
-                                        ha='center', va='center', color='white', 
-                                        fontsize=9, fontweight='bold',
-                                        bbox=dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.8))
-            
-            # Añadir línea de referencia al 100%
-            ax4.axhline(y=100, color='black', linestyle='--', alpha=0.5)
-            
-            # Configurar ejes
-            ax4.set_xticks(positions)
-            ax4.set_xticklabels(visualization_server_names, fontsize=11, fontweight='bold')
-            ax4.set_ylim(0, 110)  # Dar espacio para etiquetas
-            ax4.set_yticks([0, 25, 50, 75, 100])
-            ax4.grid(axis='y', linestyle='--', alpha=0.3)
-            
-            # Crear una tabla detallada de las VMs y guardarla como imagen separada
-            table_filename = os.path.join(results_dir, f'resultado_tabla_{timestamp}.png')
-
-            # Encontrar los detalles de las VMs desde el objeto de respuesta de API si está disponible
-            if api_response and 'content' in api_response and 'assignments' in api_response['content']:
-                table_data = []
-                vm_info = {}
-                
-                # Buscar las VMs originales en self.slice.vms en lugar de self.vms
-                for vm in self.slice.vms:
-                    vm_info[vm.id] = {
-                        "vcpus": vm.flavor.vcpus,
-                        "ram": vm.flavor.ram / 1024,  # Convertir a GB
-                        "disk": vm.flavor.disk
-                    }
-                    
-                # Preparar los datos para la tabla
-                for assignment in sorted(api_response['content']['assignments'], key=lambda x: x['vm_id']):
-                    vm_id = assignment['vm_id']
-                    resources = vm_info.get(vm_id, {"vcpus": "-", "ram": "-", "disk": "-"})
-                    
-                    table_data.append([
-                        assignment['vm_name'],
-                        f"{resources['vcpus']}",
-                        f"{resources['ram']:.2f} GB", 
-                        f"{resources['disk']:.1f} GB",
-                        assignment['server_name']
-                    ])
-
+            # Verificar que tenemos información de servidores
+            if not servers_vm_map:
+                Logger.error("No hay información de asignación de VMs a servidores")
+                # En lugar de retornar, dibujar un texto explicativo
+                ax4.text(0.5, 0.5, "No hay datos de asignación disponibles", 
+                        ha='center', va='center', fontsize=14, color='red',
+                        bbox=dict(facecolor='white', edgecolor='red', boxstyle='round,pad=1'))
             else:
-                # Si no hay datos del API, usar la información calculada
-                table_data = []
-                for vm in sorted(vm_details, key=lambda x: x["vm_id"]):
-                    table_data.append([
-                        vm["vm_name"],
-                        f"{vm.get('vcpus', '-')}",
-                        f"{vm.get('ram', 0)/1024:.2f} GB", 
-                        f"{vm.get('disk', 0):.1f} GB",     
-                        vm["server_name"]
-                    ])
-
-            # Crear figura para la tabla más atractiva
+                # Nombres de servidores para visualización
+                visualization_server_names = sorted(servers_vm_map.keys())
+                
+                # Definir colores para cada tipo de recurso
+                color_vcpus = '#4287f5'  # Azul para vCPUs
+                color_ram = '#42f584'    # Verde para RAM
+                color_disk = '#f54242'   # Rojo para Disco
+                
+                # Crear barras para la gráfica de asignación
+                bar_width = 0.25
+                positions = np.arange(len(visualization_server_names))
+                
+                # Configurar tipos de recursos y sus colores
+                resource_types = ['vCPUs', 'RAM', 'Disco']
+                resource_colors = [color_vcpus, color_ram, color_disk]
+                resource_positions = [-1, 0, 1]  # Posición relativa de cada barra
+                
+                # Crear leyenda para tipos de recursos
+                legend_elements = [
+                    plt.Rectangle((0,0), 1, 1, color=color_vcpus, label='vCPUs'),
+                    plt.Rectangle((0,0), 1, 1, color=color_ram, label='RAM'),
+                    plt.Rectangle((0,0), 1, 1, color=color_disk, label='Disk')
+                ]
+                ax4.legend(handles=legend_elements, loc='upper right', title='Tipos de Recursos',
+                        fontsize=10, title_fontsize=11, framealpha=0.9, facecolor='white',
+                        edgecolor='gray', fancybox=True, shadow=True)
+                
+                # Para cada tipo de recurso, generar gráfico de barras
+                for i, (resource_type, color, position) in enumerate(zip(resource_types, resource_colors, resource_positions)):
+                    for server_idx, server_name in enumerate(visualization_server_names):
+                        x_pos = positions[server_idx] + position * bar_width
+                        server_id = next((sid for sid in server_ids if server_usage[sid]["server_name"] == server_name), None)
+                        
+                        if server_id is None:
+                            continue
+                        
+                        # Obtener VMs de este servidor
+                        server_vms = servers_vm_map.get(server_name, [])
+                        
+                        # Si no hay VMs en este servidor, continuar al siguiente
+                        if not server_vms:
+                            continue
+                        
+                        # Obtener el porcentaje total de uso
+                        if resource_type == 'vCPUs':
+                            percent_used = server_usage[server_id]["vcpus"]["percent"]
+                        elif resource_type == 'RAM':
+                            percent_used = server_usage[server_id]["ram"]["percent"]
+                        else:  # Disco
+                            percent_used = server_usage[server_id]["disk"]["percent"]
+                        
+                        # Calcular contribuciones de cada VM
+                        if server_vms:
+                            if resource_type == 'vCPUs':
+                                # Asegurar que todas las VMs tienen valores de vCPU
+                                for vm in server_vms:
+                                    if 'vcpus' not in vm:
+                                        vm['vcpus'] = 1  # Valor por defecto
+                                
+                                total_resource = max(sum(vm.get('vcpus', 0) for vm in server_vms), 1)  # Evitar división por cero
+                                vm_percentages = [(vm.get('vcpus', 0) / total_resource * percent_used) if total_resource > 0 else 0 for vm in server_vms]
+                            elif resource_type == 'RAM':
+                                # Asegurar que todas las VMs tienen valores de RAM
+                                for vm in server_vms:
+                                    if 'ram' not in vm:
+                                        vm['ram'] = 1024  # Valor por defecto
+                                
+                                total_resource = max(sum(vm.get('ram', 0) for vm in server_vms), 1)  # Evitar división por cero
+                                vm_percentages = [(vm.get('ram', 0) / total_resource * percent_used) if total_resource > 0 else 0 for vm in server_vms]
+                            else:  # Disco
+                                # Asegurar que todas las VMs tienen valores de disco
+                                for vm in server_vms:
+                                    if 'disk' not in vm:
+                                        vm['disk'] = 10.0  # Valor por defecto
+                                
+                                total_resource = max(sum(vm.get('disk', 0) for vm in server_vms), 1)  # Evitar división por cero
+                                vm_percentages = [(vm.get('disk', 0) / total_resource * percent_used) if total_resource > 0 else 0 for vm in server_vms]
+                            
+                            # Dibujar barras apiladas para cada VM
+                            bottom = 0
+                            for j, (vm, vm_percent) in enumerate(zip(server_vms, vm_percentages)):
+                                # Crear variaciones de color para distinguir mejor las VMs
+                                vm_color = color
+                                if j % 2 == 0:  # VMs con índice par ligeramente más oscuras
+                                    r, g, b = matplotlib.colors.to_rgb(color)
+                                    vm_color = (r*0.8, g*0.8, b*0.8)  # 20% más oscuro
+                                
+                                # Dibujar segmento para esta VM
+                                segment = ax4.bar(
+                                    x_pos, 
+                                    vm_percent, 
+                                    bar_width, 
+                                    bottom=bottom, 
+                                    color=vm_color, 
+                                    edgecolor='white',  # Borde blanco para separar VMs
+                                    linewidth=1.0       # Grosor del borde aumentado para mejor visibilidad
+                                )
+                                
+                                # Añadir etiqueta con el nombre de la VM
+                                if vm_percent > 3.0:  # Solo etiquetar si hay suficiente espacio
+                                    y_pos = bottom + vm_percent/2
+                                    # Usar rectángulo con fondo semitransparente para mejorar legibilidad
+                                    ax4.text(
+                                        x_pos, 
+                                        y_pos, 
+                                        vm["vm_name"], 
+                                        ha='center', 
+                                        va='center', 
+                                        color='white', 
+                                        fontsize=9, 
+                                        fontweight='bold',
+                                        bbox=dict(
+                                            boxstyle="round,pad=0.2", 
+                                            fc=vm_color, 
+                                            ec='white',    # Borde blanco para el texto
+                                            alpha=0.95,    # Más opaco para mejor legibilidad
+                                            linewidth=0.5  # Borde más fino
+                                        )
+                                    )
+                                
+                                bottom += vm_percent
+                        else:
+                            # Si no hay VMs, mostrar barra vacía con texto explicativo
+                            ax4.bar(x_pos, 0, bar_width, color=color, alpha=0.3)
+                
+            
+                # Añadir línea de referencia al 100%
+                ax4.axhline(y=100, color='black', linestyle='--', alpha=0.5)
+                
+                # Configurar ejes
+                ax4.set_xticks(positions)
+                ax4.set_xticklabels(visualization_server_names, fontsize=11, fontweight='bold')
+                ax4.set_ylim(0, 110)  # Dar espacio para etiquetas
+                ax4.set_yticks([0, 25, 50, 75, 100])
+                ax4.grid(axis='y', linestyle='--', alpha=0.3)
+            
+            # Crear tabla detallada de las VMs
+            table_filename = os.path.join(results_dir, f'resultado_tabla_{timestamp}.png')
+            
+            # Preparar datos para la tabla
+            table_data = []
+            for vm in sorted(vm_details, key=lambda x: x["vm_id"]):
+                table_data.append([
+                    vm["vm_name"],
+                    f"{vm.get('vcpus', '-')}",
+                    f"{vm.get('ram', 0)/1024:.2f} GB", 
+                    f"{vm.get('disk', 0):.1f} GB",     
+                    vm["server_name"]
+                ])
+            
+            # Si no hay datos para la tabla, crear una fila con mensaje
+            if not table_data:
+                table_data.append(["No hay datos disponibles", "-", "-", "-", "-"])
+            
+            # Crear figura para la tabla
             fig_table = plt.figure(figsize=(10, len(table_data) * 0.5 + 1.5), facecolor='#f9f9f9')
             ax_table = fig_table.add_subplot(111)
-
-            # Ocultar ejes
             ax_table.axis('off')
             ax_table.axis('tight')
-
-            # Definir colores para la tabla
-            header_color = '#4472C4'  # Azul para encabezados
-            row_colors = ['#E6F0FF', '#FFFFFF']  # Alternar colores de fila
             
-            # Crear la tabla con estilos mejorados
+            # Crear tabla con estilo mejorado
             table = ax_table.table(
                 cellText=table_data,
                 colLabels=['Máquina Virtual', 'vCPUs', 'RAM', 'Disco', 'Servidor'],
                 loc='center',
                 cellLoc='center'
             )
-
-            # Mejorar estilo de la tabla
+            
+            # Aplicar estilos a la tabla
             table.auto_set_font_size(False)
             table.set_fontsize(10)
             table.scale(1.2, 1.5)
-
+            
             # Aplicar colores y estilos a las celdas
+            header_color = '#4472C4'  # Azul para encabezados
+            row_colors = ['#E6F0FF', '#FFFFFF']  # Alternar colores de fila
+            
             for k, cell in table.get_celld().items():
                 cell.set_edgecolor('#BFBFBF')
                 
-                # Encabezados de columnas (fila 0)
-                if k[0] == 0:
+                if k[0] == 0:  # Encabezados
                     cell.set_text_props(weight='bold', color='white')
                     cell.set_facecolor(header_color)
                 else:
-                    # Alternar colores para filas de datos
                     cell.set_facecolor(row_colors[(k[0]) % 2])
                     
-                    # Alinear columnas numéricas a la derecha
+                    # Alineación para columnas numéricas
                     if k[1] in [1, 2, 3]:  # vCPUs, RAM, Disco
                         cell.get_text().set_horizontalalignment('right')
-
-            # Agregar título con estilo
+            
+            # Título de la tabla
             ax_table.set_title("Detalle de VMs Asignadas", 
                             fontsize=14, 
                             fontweight='bold',
                             color='#333333',
                             pad=20)
-
+            
             fig_table.text(0.5, 0.02, f"Generado: {timestamp_text}", 
                         ha='center', fontsize=8, style='italic', color='gray')
-
-            # Guardar tabla con mayor calidad
+            
+            # Guardar tabla
             plt.tight_layout()
             plt.savefig(table_filename, dpi=300, bbox_inches='tight', facecolor=fig_table.get_facecolor())
             plt.close(fig_table)
             
-            # Ajustar diseño y guardar la figura principal
+            # Guardar gráficos principales
             plt.tight_layout()
             plt.savefig(filename, dpi=300, bbox_inches='tight')
             plt.close(fig)
@@ -1826,7 +1846,86 @@ class SliceBasedPlacementSolver:
         except Exception as e:
             Logger.error(f"Error al generar visualización: {str(e)}")
             Logger.debug(f"Traceback: {traceback.format_exc()}")
-    
+
+    def _extract_placement_data_from_result(self, result, vm_details, server_usage):
+        """
+        Método auxiliar para extraer datos de visualización directamente del resultado
+        
+        Args:
+            result: Objeto PlacementResult
+            vm_details: Lista para almacenar detalles de VMs (se modifica in-place)
+            server_usage: Diccionario para almacenar uso de recursos (se modifica in-place)
+        """
+        # Crear un mapa de servidores a VMs asignadas
+        server_to_vms = {}
+        for vm_id, server_id in result.assignments.items():
+            if server_id not in server_to_vms:
+                server_to_vms[server_id] = []
+            server_to_vms[server_id].append(vm_id)
+        
+        # Procesar cada servidor y sus VMs asignadas
+        for server_id, vm_ids in server_to_vms.items():
+            # Buscar el objeto servidor
+            server = next((s for s in self.servers if s.id == server_id), None)
+            if not server:
+                continue
+                
+            vcpus_used = 0
+            ram_used = 0
+            disk_used = 0.0
+            
+            for vm_id in vm_ids:
+                # Buscar el objeto VM en self.slice.vms
+                vm = next((v for v in self.slice.vms if v.id == vm_id), None)
+                if not vm:
+                    continue
+                    
+                vcpus_used += vm.flavor.vcpus
+                ram_used += vm.flavor.ram
+                disk_used += vm.flavor.disk
+                
+                # Guardar información detallada de la VM
+                vm_details.append({
+                    "vm_id": vm_id,
+                    "vm_name": vm.name,
+                    "server_id": server_id,
+                    "server_name": server.name,
+                    "vcpus": vm.flavor.vcpus,
+                    "ram": vm.flavor.ram,
+                    "disk": vm.flavor.disk
+                })
+            
+            # Calcular uso total para este servidor
+            total_vcpus_used = server.used_vcpus + vcpus_used
+            total_ram_used = server.used_ram + ram_used
+            total_disk_used = server.used_disk + disk_used
+            
+            # Calcular porcentajes
+            total_vcpus_percent = min(100, (total_vcpus_used / server.total_vcpus * 100)) if server.total_vcpus > 0 else 0
+            total_ram_percent = min(100, (total_ram_used / server.total_ram * 100)) if server.total_ram > 0 else 0
+            total_disk_percent = min(100, (total_disk_used / server.total_disk * 100)) if server.total_disk > 0 else 0
+            
+            # Almacenar datos del servidor
+            server_usage[server_id] = {
+                "server_name": server.name,
+                "vcpus": {
+                    "used": total_vcpus_used,
+                    "total": server.total_vcpus,
+                    "percent": total_vcpus_percent
+                },
+                "ram": {
+                    "used": total_ram_used,
+                    "total": server.total_ram,
+                    "percent": total_ram_percent
+                },
+                "disk": {
+                    "used": total_disk_used,
+                    "total": server.total_disk,
+                    "percent": total_disk_percent
+                },
+                "vms": len(vm_ids)
+            }
+
 class DataManager:
     """
     Gestiona la conversión entre diferentes formatos de datos para VM placement
