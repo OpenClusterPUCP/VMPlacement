@@ -55,7 +55,7 @@ import json
 import random
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 
 # Bibliotecas científicas:
 import numpy as np
@@ -314,6 +314,78 @@ class Flavor:
         return f"Flavor {self.id}: {self.name} (vCPUs: {self.vcpus}, RAM: {self.ram} MB, Disk: {self.disk:.1f} GB)"
 
 @dataclass
+class UserProfile:
+    """Define perfiles de usuario con diferentes patrones de consumo de recursos"""
+    ALUMNO = "alumno"      # Uso básico, bajo consumo
+    JP = "jp"              # Uso intermedio
+    MAESTRO = "maestro"    # Uso avanzado
+    INVESTIGADOR = "investigador"  # Uso intensivo
+    
+    @staticmethod
+    def get_resource_usage_factors(profile: str) -> Dict[str, float]:
+        """
+        Devuelve factores de uso real de recursos para cada perfil
+        (porcentaje del flavor que realmente utilizan en promedio)
+        """
+        profiles = {
+            UserProfile.ALUMNO: {"vcpu": 0.3, "ram": 0.4, "disk": 0.2},
+            UserProfile.JP: {"vcpu": 0.5, "ram": 0.6, "disk": 0.3},
+            UserProfile.MAESTRO: {"vcpu": 0.7, "ram": 0.8, "disk": 0.4},
+            UserProfile.INVESTIGADOR: {"vcpu": 0.9, "ram": 0.9, "disk": 0.5}
+        }
+        return profiles.get(profile.lower(), profiles[UserProfile.ALUMNO])
+    
+    @staticmethod
+    def get_workload_variability(profile: str) -> float:
+        """
+        Devuelve factor de variabilidad de carga por perfil
+        (qué tanto puede variar el uso en picos durante el ciclo de vida)
+        """
+        variability = {
+            UserProfile.ALUMNO: 1.2,      # 20% de variabilidad
+            UserProfile.JP: 1.5,          # 50% de variabilidad
+            UserProfile.MAESTRO: 1.8,     # 80% de variabilidad
+            UserProfile.INVESTIGADOR: 2.0 # 100% de variabilidad (puede duplicar uso)
+        }
+        return variability.get(profile.lower(), 1.5)
+    
+    @staticmethod
+    def get_overprovisioning_limits(profile: str) -> Dict[str, float]:
+        """
+        Devuelve límites de sobreaprovisionamiento permitidos por SLA
+        según el perfil de usuario
+        """
+        # Perfiles con mayor prioridad tienen límites más estrictos
+        limits = {
+            UserProfile.ALUMNO: {"vcpu": 3.0, "ram": 1.5, "disk": 5.0},
+            UserProfile.JP: {"vcpu": 2.5, "ram": 1.4, "disk": 4.0},
+            UserProfile.MAESTRO: {"vcpu": 2.0, "ram": 1.3, "disk": 3.0},
+            UserProfile.INVESTIGADOR: {"vcpu": 1.5, "ram": 1.2, "disk": 2.0}
+        }
+        return limits.get(profile.lower(), limits[UserProfile.ALUMNO])
+
+@dataclass
+class WorkloadType:
+    """Define tipos de cargas de trabajo con diferentes patrones de uso"""
+    GENERAL = "general"               # Uso equilibrado de recursos
+    CPU_INTENSIVE = "cpu_intensive"   # Alto uso de CPU
+    MEMORY_INTENSIVE = "memory_intensive"  # Alto uso de memoria
+    IO_INTENSIVE = "io_intensive"     # Alto uso de disco/red
+    
+    @staticmethod
+    def get_resource_weights(workload_type: str) -> Dict[str, float]:
+        """
+        Devuelve pesos relativos para cada tipo de recurso según workload
+        """
+        weights = {
+            WorkloadType.GENERAL: {"vcpu": 0.4, "ram": 0.4, "disk": 0.2},
+            WorkloadType.CPU_INTENSIVE: {"vcpu": 0.7, "ram": 0.2, "disk": 0.1},
+            WorkloadType.MEMORY_INTENSIVE: {"vcpu": 0.2, "ram": 0.7, "disk": 0.1},
+            WorkloadType.IO_INTENSIVE: {"vcpu": 0.2, "ram": 0.3, "disk": 0.5}
+        }
+        return weights.get(workload_type.lower(), weights[WorkloadType.GENERAL])
+
+@dataclass
 class VirtualMachine:
     """
     Representa una máquina virtual con su flavor asociado
@@ -326,10 +398,77 @@ class VirtualMachine:
     def __str__(self):
         return f"VM {self.id}: {self.name} - {self.flavor.name} (Utilidad: {self.utility:.2f})"
 
+
+@dataclass
+class Slice:
+    """Representa un conjunto de VMs relacionadas a desplegar como unidad"""
+    id: int
+    name: str
+    vms: List[VirtualMachine]
+    user_profile: str = UserProfile.ALUMNO
+    workload_type: str = WorkloadType.GENERAL
+    
+    def get_total_nominal_resources(self) -> Dict[str, Union[int, float]]:
+        """Calcula recursos totales nominales del slice (según flavors)"""
+        return {
+            "vcpu": sum(vm.flavor.vcpus for vm in self.vms),
+            "ram": sum(vm.flavor.ram for vm in self.vms),
+            "disk": sum(vm.flavor.disk for vm in self.vms)
+        }
+    
+    def get_estimated_usage(self) -> Dict[str, float]:
+        """
+        Calcula estimación de uso real de recursos considerando el perfil
+        de usuario, tipo de workload y variabilidad
+        """
+        nominal = self.get_total_nominal_resources()
+        usage_factors = UserProfile.get_resource_usage_factors(self.user_profile)
+        variability = UserProfile.get_workload_variability(self.user_profile)
+        
+        return {
+            "vcpu": nominal["vcpu"] * usage_factors["vcpu"] * variability,
+            "ram": nominal["ram"] * usage_factors["ram"] * variability,
+            "disk": nominal["disk"] * usage_factors["disk"] * variability
+        }
+    
+    def get_resource_weights(self) -> Dict[str, float]:
+        """Obtiene pesos relativos para cada tipo de recurso según el workload"""
+        return WorkloadType.get_resource_weights(self.workload_type)
+    
+    def calculate_utility(self) -> float:
+        """
+        Calcula la utilidad del slice completo basada en sus recursos y perfil
+        """
+        # Obtener estimación de uso real
+        estimated = self.get_estimated_usage()
+        
+        # Obtener pesos por tipo de recurso según workload
+        weights = self.get_resource_weights()
+        
+        # Cálculo de utilidad ponderada (prioriza recursos según tipo de workload)
+        utility = (
+            weights["vcpu"] * estimated["vcpu"] + 
+            weights["ram"] * (estimated["ram"] / 1024) +  # Convertir a GB para escalar
+            weights["disk"] * estimated["disk"]
+        )
+        
+        # Factores adicionales según el rol del usuario
+        role_factors = {
+            UserProfile.ALUMNO: 1.0,
+            UserProfile.JP: 1.5,
+            UserProfile.MAESTRO: 2.0,
+            UserProfile.INVESTIGADOR: 3.0
+        }
+        
+        role_factor = role_factors.get(self.user_profile, 1.0)
+        utility *= role_factor
+        
+        return utility
+
 @dataclass
 class PhysicalServer:
     """
-    Representa un servidor físico con sus capacidades y uso actual
+    Representa un servidor físico con sus capacidades, uso actual y métricas de congestión
     """
     id: int
     name: str
@@ -340,31 +479,204 @@ class PhysicalServer:
     used_ram: int = 0
     used_disk: float = 0.0
     
+    # Factores de sobreaprovisionamiento predeterminados
+    vcpu_overprovisioning_factor: float = 2.0  # Sobreaprovisionamiento de CPU
+    ram_overprovisioning_factor: float = 1.3   # Sobreaprovisionamiento de RAM
+    disk_overprovisioning_factor: float = 3.0  # Sobreaprovisionamiento de disco
+    
+    # Factor de rendimiento relativo del servidor
+    performance_factor: float = 1.0
+    
     @property
     def available_vcpus(self) -> int:
-        """Retorna la cantidad de vCPUs disponibles"""
+        """vCPUs disponibles sin sobreaprovisionamiento"""
         return self.total_vcpus - self.used_vcpus
     
     @property
     def available_ram(self) -> int:
-        """Retorna la cantidad de RAM disponible en MB"""
+        """RAM disponible sin sobreaprovisionamiento (MB)"""
         return self.total_ram - self.used_ram
     
     @property
     def available_disk(self) -> float:
-        """Retorna la cantidad de espacio en disco disponible en GB"""
+        """Disco disponible sin sobreaprovisionamiento (GB)"""
         return self.total_disk - self.used_disk
     
-    def __str__(self):
-        # Calcular porcentajes de uso
-        vcpu_pct = (self.used_vcpus / self.total_vcpus * 100) if self.total_vcpus > 0 else 0
-        ram_pct = (self.used_ram / self.total_ram * 100) if self.total_ram > 0 else 0
-        disk_pct = (self.used_disk / self.total_disk * 100) if self.total_disk > 0 else 0
+    @property
+    def max_vcpus_with_overprovisioning(self) -> float:
+        """Capacidad máxima de vCPUs con sobreaprovisionamiento"""
+        return self.total_vcpus * self.vcpu_overprovisioning_factor
+    
+    @property
+    def max_ram_with_overprovisioning(self) -> float:
+        """Capacidad máxima de RAM con sobreaprovisionamiento"""
+        return self.total_ram * self.ram_overprovisioning_factor
+    
+    @property
+    def max_disk_with_overprovisioning(self) -> float:
+        """Capacidad máxima de disco con sobreaprovisionamiento"""
+        return self.total_disk * self.disk_overprovisioning_factor
+    
+    def get_real_time_resources(self) -> Dict[str, Union[int, float]]:
+        """
+        Obtiene recursos disponibles en tiempo real mediante API externa
+        NOTA: En una implementación real, esto consultaría una API de monitoreo.
+              Por ahora, simulamos con los valores actuales calculados.
+        """
+        # TODO: Reemplazar con llamada real a API de monitoreo cuando esté disponible
+        return {
+            "available_vcpus": self.available_vcpus,
+            "available_ram": self.available_ram,
+            "available_disk": self.available_disk
+        }
+    
+    def get_current_congestion(self) -> Dict[str, float]:
+        """
+        Calcula niveles actuales de congestión por tipo de recurso (0-1)
+        Valores más altos indican mayor congestión
+        """
+        # Congestión normalizada por tipo de recurso
+        vcpu_congestion = min(1.0, self.used_vcpus / self.max_vcpus_with_overprovisioning)
+        ram_congestion = min(1.0, self.used_ram / self.max_ram_with_overprovisioning)
+        disk_congestion = min(1.0, self.used_disk / self.max_disk_with_overprovisioning)
         
-        return (f"Servidor {self.id}: {self.name} - "
-                f"CPU: {self.used_vcpus}/{self.total_vcpus} ({vcpu_pct:.1f}%), "
-                f"RAM: {self.used_ram}/{self.total_ram} MB ({ram_pct:.1f}%), "
-                f"Disco: {self.used_disk:.1f}/{self.total_disk:.1f} GB ({disk_pct:.1f}%)")
+        # Ponderación de congestión (mayor peso a CPU y RAM)
+        weighted_congestion = 0.5 * vcpu_congestion + 0.35 * ram_congestion + 0.15 * disk_congestion
+        
+        return {
+            "vcpu": vcpu_congestion,
+            "ram": ram_congestion,
+            "disk": disk_congestion,
+            "weighted": weighted_congestion
+        }
+    
+    def estimate_congestion_after_slice(self, slice: Slice) -> Dict[str, float]:
+        """
+        Estima la congestión resultante después de asignar un slice completo
+        """
+        # Obtener uso estimado de recursos del slice
+        estimated_usage = slice.get_estimated_usage()
+        
+        # Calcular nuevos niveles de uso
+        new_used_vcpus = self.used_vcpus + estimated_usage["vcpu"]
+        new_used_ram = self.used_ram + estimated_usage["ram"]
+        new_used_disk = self.used_disk + estimated_usage["disk"]
+        
+        # Calcular congestión por tipo de recurso
+        vcpu_congestion = min(1.0, new_used_vcpus / self.max_vcpus_with_overprovisioning)
+        ram_congestion = min(1.0, new_used_ram / self.max_ram_with_overprovisioning)
+        disk_congestion = min(1.0, new_used_disk / self.max_disk_with_overprovisioning)
+        
+        # Ponderar según el tipo de workload del slice
+        resource_weights = slice.get_resource_weights()
+        weighted_congestion = (
+            resource_weights["vcpu"] * vcpu_congestion +
+            resource_weights["ram"] * ram_congestion +
+            resource_weights["disk"] * disk_congestion
+        )
+        
+        return {
+            "vcpu": vcpu_congestion,
+            "ram": ram_congestion,
+            "disk": disk_congestion,
+            "weighted": weighted_congestion
+        }
+    
+    def estimate_queue_time(self, slice: Slice) -> float:
+        """
+        Estima tiempo relativo de espera en cola para el slice (0-1)
+        Valores más altos indican mayor tiempo de espera
+        """
+        # Estimar congestión tras asignar el slice
+        congestion = self.estimate_congestion_after_slice(slice)
+        
+        # Función no lineal para estimar tiempo de espera según congestión
+        # (crece exponencialmente cuando la congestión es alta)
+        vcpu_congestion = congestion["vcpu"]
+        
+        if vcpu_congestion <= 0.7:
+            # Crecimiento lineal hasta 70% de congestión
+            queue_time = vcpu_congestion * 0.4  # máximo 0.28 cuando 70%
+        else:
+            # Crecimiento exponencial después del 70%
+            # Tiempo base + incremento exponencial
+            base = 0.28  # valor a 70%
+            queue_time = base + ((vcpu_congestion - 0.7) / 0.3) ** 2 * 0.72  # máximo 1.0
+        
+        return queue_time
+    
+    def can_host_slice(self, slice: Slice) -> bool:
+        """
+        Determina si el servidor puede alojar todo el slice considerando
+        sobreaprovisionamiento y perfiles de usuario
+        """
+        # Obtener uso estimado del slice
+        estimated_usage = slice.get_estimated_usage()
+        
+        # Obtener límites de sobreaprovisionamiento según el perfil
+        overprovisioning_limits = UserProfile.get_overprovisioning_limits(slice.user_profile)
+        
+        # Calcular capacidades máximas considerando SLA
+        max_vcpus = self.total_vcpus * overprovisioning_limits["vcpu"]
+        max_ram = self.total_ram * overprovisioning_limits["ram"]
+        max_disk = self.total_disk * overprovisioning_limits["disk"]
+        
+        # Verificar si hay suficientes recursos
+        sufficient_vcpus = (self.used_vcpus + estimated_usage["vcpu"]) <= max_vcpus
+        sufficient_ram = (self.used_ram + estimated_usage["ram"]) <= max_ram
+        sufficient_disk = (self.used_disk + estimated_usage["disk"]) <= max_disk
+        
+        # Comprobar todos los recursos
+        return sufficient_vcpus and sufficient_ram and sufficient_disk
+    
+    def get_slice_fit_score(self, slice: Slice) -> float:
+        """
+        Calcula un puntaje que indica qué tan bien se ajusta un slice a este servidor.
+        Mayor puntaje = mejor ajuste (0 = no es viable)
+        """
+        # Si no puede hospedar el slice, retornar 0
+        if not self.can_host_slice(slice):
+            return 0.0
+        
+        # Factor 1: Congestión tras asignar el slice (menor congestión = mayor puntaje)
+        congestion = self.estimate_congestion_after_slice(slice)
+        congestion_factor = 1.0 - congestion["weighted"]  # 0-1, mayor es mejor
+        
+        # Factor 2: Tiempo de espera en cola (menor tiempo = mayor puntaje)
+        queue_time = self.estimate_queue_time(slice)
+        queue_factor = 1.0 - queue_time  # 0-1, mayor es mejor
+        
+        # Factor 3: Rendimiento del servidor
+        performance_factor = self.performance_factor  # configurable por servidor
+        
+        # Factor 4: Bonus por consolidación (preferimos agrupar VMs relacionadas)
+        # Mayor bonus para slices con más VMs
+        consolidation_bonus = 1.0 + (min(len(slice.vms), 10) / 20.0)  # máx +50%
+        
+        # Calcular puntaje final combinado
+        score = (
+            0.4 * congestion_factor +  # 40% del peso
+            0.3 * queue_factor +       # 30% del peso
+            0.3 * performance_factor   # 30% del peso
+        ) * consolidation_bonus
+        
+        return score
+    
+    def can_host_partial_slice(self, slice: Slice, vm_subset: List[VirtualMachine]) -> bool:
+        """
+        Determina si el servidor puede alojar un subconjunto específico de VMs del slice
+        """
+        # Crear un slice parcial con el subconjunto de VMs
+        partial_slice = Slice(
+            id=slice.id,
+            name=f"{slice.name}_partial",
+            vms=vm_subset,
+            user_profile=slice.user_profile,
+            workload_type=slice.workload_type
+        )
+        
+        # Verificar si puede hospedar este slice parcial
+        return self.can_host_slice(partial_slice)
 
 @dataclass
 class PlacementResult:
@@ -1189,6 +1501,402 @@ class VMPlacementSolver:
             Logger.error(f"Error al generar visualización: {str(e)}")
             Logger.debug(f"Traceback: {traceback.format_exc()}")
 
+class SliceBasedPlacementSolver:
+    """
+    Resuelve el problema de asignación de slices completos a servidores físicos
+    optimizando para la performance global y priorizando la localidad de las VMs.
+    """
+    
+    def __init__(self, slice: Slice, servers: List[PhysicalServer]):
+        """
+        Inicializa el solucionador con un slice y los servidores disponibles
+        
+        Args:
+            slice: El slice completo a asignar
+            servers: Lista de servidores físicos disponibles
+        """
+        self.slice = slice
+        self.servers = servers
+    
+    def solve(self) -> PlacementResult:
+        """
+        Resuelve el problema de placement para el slice completo
+        
+        Returns:
+            PlacementResult con los resultados de la asignación
+        """
+        Logger.section(f"Iniciando placement para slice: {self.slice.name}")
+        Logger.info(f"Perfil: {self.slice.user_profile}, Tipo: {self.slice.workload_type}")
+        Logger.info(f"Total de VMs en el slice: {len(self.slice.vms)}")
+        
+        # Obtener recursos totales nominales y estimados
+        nominal = self.slice.get_total_nominal_resources()
+        estimated = self.slice.get_estimated_usage()
+        
+        Logger.info(f"Recursos nominales - vCPUs: {nominal['vcpu']}, RAM: {nominal['ram']} MB, Disco: {nominal['disk']:.1f} GB")
+        Logger.info(f"Uso estimado - vCPUs: {estimated['vcpu']:.1f}, RAM: {estimated['ram']:.1f} MB, Disco: {estimated['disk']:.1f} GB")
+        
+        # 1. Verificar si hay suficientes recursos totales
+        if not self._check_total_resources():
+            error_msg = "No hay suficientes recursos totales para alojar el slice completo"
+            Logger.error(error_msg)
+            return self._create_failure_result(error_msg)
+        
+        # 2. Verificar si al menos un servidor puede alojar el slice completo
+        viable_servers = [server for server in self.servers if server.can_host_slice(self.slice)]
+        
+        if viable_servers:
+            # Al menos un servidor puede alojar todo el slice - elegir el óptimo
+            Logger.info(f"Se encontraron {len(viable_servers)} servidores capaces de alojar el slice completo")
+            return self._solve_single_server(viable_servers)
+        else:
+            # Ningún servidor puede alojar todo el slice - intentar distribuir con enfoque
+            # que maximice la cantidad de VMs en un solo servidor
+            Logger.info("Ningún servidor puede alojar el slice completo, intentando distribuir VMs")
+            return self._solve_cluster_first_distribution()
+    
+    def _check_total_resources(self) -> bool:
+        """
+        Verifica si hay suficientes recursos totales sumando todos los servidores
+        """
+        estimated_usage = self.slice.get_estimated_usage()
+        overprovisioning_limits = UserProfile.get_overprovisioning_limits(self.slice.user_profile)
+        
+        # Sumar recursos disponibles con sobreaprovisionamiento según SLA
+        total_available_vcpus = sum(
+            max(server.total_vcpus * overprovisioning_limits["vcpu"] - server.used_vcpus, 0) 
+            for server in self.servers
+        )
+        
+        total_available_ram = sum(
+            max(server.total_ram * overprovisioning_limits["ram"] - server.used_ram, 0)
+            for server in self.servers
+        )
+        
+        total_available_disk = sum(
+            max(server.total_disk * overprovisioning_limits["disk"] - server.used_disk, 0)
+            for server in self.servers
+        )
+        
+        # Verificar si son suficientes
+        if estimated_usage["vcpu"] > total_available_vcpus:
+            Logger.warning(f"Recursos insuficientes: vCPU estimado {estimated_usage['vcpu']:.1f}, disponible {total_available_vcpus:.1f}")
+            return False
+            
+        if estimated_usage["ram"] > total_available_ram:
+            Logger.warning(f"Recursos insuficientes: RAM estimada {estimated_usage['ram']:.1f} MB, disponible {total_available_ram:.1f} MB")
+            return False
+            
+        if estimated_usage["disk"] > total_available_disk:
+            Logger.warning(f"Recursos insuficientes: Disco estimado {estimated_usage['disk']:.1f} GB, disponible {total_available_disk:.1f} GB")
+            return False
+        
+        return True
+    
+    def _solve_single_server(self, viable_servers: List[PhysicalServer]) -> PlacementResult:
+        """
+        Asigna todo el slice a un único servidor (el óptimo)
+        """
+        Logger.section("Resolviendo placement en servidor único")
+        
+        # Calcular puntaje de ajuste para cada servidor viable
+        server_scores = []
+        for server in viable_servers:
+            score = server.get_slice_fit_score(self.slice)
+            server_scores.append((server, score))
+        
+        # Ordenar por puntaje descendente
+        server_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Seleccionar el mejor servidor
+        best_server, best_score = server_scores[0]
+        
+        Logger.success(f"Servidor óptimo: {best_server.name} (ID: {best_server.id}) con score {best_score:.2f}")
+        
+        # Crear asignaciones para todas las VMs en este servidor
+        assignments = {}
+        for vm in self.slice.vms:
+            assignments[vm.id] = best_server.id
+            Logger.success(f"VM {vm.name} (ID: {vm.id}) asignada a servidor {best_server.name} (ID: {best_server.id})")
+        
+        return PlacementResult(
+            success=True,
+            assignments=assignments,
+            message=f"Slice completo asignado al servidor {best_server.name} optimizando localidad y rendimiento",
+            objective_value=best_score
+        )
+    
+    def _solve_cluster_first_distribution(self) -> PlacementResult:
+        """
+        Distribuye las VMs del slice priorizando colocar la mayor cantidad posible
+        en un solo servidor (cluster-first approach) para maximizar la localidad.
+        """
+        Logger.section("Distribuyendo slice con enfoque de maximizar clusterización")
+        
+        # Verificar si las VMs individualmente pueden ser asignadas
+        unassignable_vms = []
+        for vm in self.slice.vms:
+            # Crear un mini-slice con solo esta VM
+            mini_slice = Slice(
+                id=self.slice.id,
+                name=f"mini_{vm.name}",
+                vms=[vm],
+                user_profile=self.slice.user_profile,
+                workload_type=self.slice.workload_type
+            )
+            
+            # Verificar si algún servidor puede alojar esta VM
+            if not any(server.can_host_slice(mini_slice) for server in self.servers):
+                unassignable_vms.append(vm)
+                Logger.warning(f"VM {vm.name} (ID: {vm.id}) no puede ser asignada a ningún servidor")
+        
+        if unassignable_vms:
+            # Hay VMs que no pueden ser asignadas
+            vm_names = [vm.name for vm in unassignable_vms]
+            error_msg = f"Las siguientes VMs no pueden ser asignadas a ningún servidor: {', '.join(vm_names)}"
+            Logger.error(error_msg)
+            return self._create_failure_result(error_msg, unassignable_vms)
+        
+        # Algoritmo de distribución con enfoque de cluster first
+        return self._solve_with_cluster_first_algorithm()
+    
+    def _solve_with_cluster_first_algorithm(self) -> PlacementResult:
+        """
+        Implementa el algoritmo Cluster-First que maximiza el número de VMs
+        en un solo servidor antes de distribuir el resto.
+        """
+        Logger.section("Aplicando algoritmo Cluster-First para maximizar localidad")
+        
+        # Paso 1: Identificar el servidor que puede alojar la mayor cantidad de VMs
+        max_vms_count = 0
+        best_server = None
+        best_vm_subset = []
+        
+        # Para cada servidor, encontrar la mayor cantidad de VMs que puede alojar
+        for server in self.servers:
+            # Calcular capacidad restante del servidor
+            remaining_vcpus = server.total_vcpus * UserProfile.get_overprovisioning_limits(self.slice.user_profile)["vcpu"] - server.used_vcpus
+            remaining_ram = server.total_ram * UserProfile.get_overprovisioning_limits(self.slice.user_profile)["ram"] - server.used_ram
+            remaining_disk = server.total_disk * UserProfile.get_overprovisioning_limits(self.slice.user_profile)["disk"] - server.used_disk
+            
+            # Seleccionar las VMs que cabrían en este servidor (ordenadas por utilidad)
+            usage_factors = UserProfile.get_resource_usage_factors(self.slice.user_profile)
+            variability = UserProfile.get_workload_variability(self.slice.user_profile)
+            
+            # Ordenar VMs por utilidad descendente (primero las más valiosas)
+            sorted_vms = sorted(self.slice.vms, key=lambda vm: (
+                vm.utility if hasattr(vm, 'utility') and vm.utility > 0 
+                else vm.flavor.vcpus * usage_factors["vcpu"] * variability +
+                     vm.flavor.ram * usage_factors["ram"] * variability / 1024 +
+                     vm.flavor.disk * usage_factors["disk"] * variability
+            ), reverse=True)
+            
+            # Intentar colocar tantas VMs como sea posible en este servidor
+            current_vcpus = 0
+            current_ram = 0
+            current_disk = 0
+            vm_subset = []
+            
+            for vm in sorted_vms:
+                # Calcular uso estimado de esta VM
+                vm_vcpus = vm.flavor.vcpus * usage_factors["vcpu"] * variability
+                vm_ram = vm.flavor.ram * usage_factors["ram"] * variability
+                vm_disk = vm.flavor.disk * usage_factors["disk"] * variability
+                
+                # Verificar si cabe en el espacio restante
+                if (current_vcpus + vm_vcpus <= remaining_vcpus and
+                    current_ram + vm_ram <= remaining_ram and
+                    current_disk + vm_disk <= remaining_disk):
+                    
+                    # VM cabe, agregarla al subconjunto
+                    vm_subset.append(vm)
+                    current_vcpus += vm_vcpus
+                    current_ram += vm_ram
+                    current_disk += vm_disk
+            
+            # Actualizar si este servidor puede alojar más VMs que el mejor actual
+            if len(vm_subset) > max_vms_count:
+                max_vms_count = len(vm_subset)
+                best_server = server
+                best_vm_subset = vm_subset
+        
+        if not best_server or not best_vm_subset:
+            Logger.error("No se pudo encontrar un servidor capaz de alojar ninguna VM del slice")
+            return self._create_failure_result("No hay servidores disponibles para el slice")
+        
+        Logger.success(f"Servidor principal: {best_server.name} (ID: {best_server.id}) - alojará {len(best_vm_subset)} de {len(self.slice.vms)} VMs")
+        
+        # Asignación para el primer grupo de VMs al mejor servidor
+        assignments = {}
+        for vm in best_vm_subset:
+            assignments[vm.id] = best_server.id
+            Logger.success(f"VM {vm.name} (ID: {vm.id}) asignada a servidor principal {best_server.name} (ID: {best_server.id})")
+        
+        # Identificar VMs restantes
+        remaining_vms = [vm for vm in self.slice.vms if vm.id not in assignments]
+        
+        if not remaining_vms:
+            # Todas las VMs colocadas en un solo servidor
+            return PlacementResult(
+                success=True,
+                assignments=assignments,
+                message=f"Todas las VMs del slice asignadas a un único servidor: {best_server.name}",
+                objective_value=1.0  # Máxima puntuación por localidad perfecta
+            )
+        
+        # Distribuir VMs restantes a otros servidores
+        Logger.info(f"Distribuyendo {len(remaining_vms)} VMs restantes a servidores adicionales")
+        
+        # Excluir el servidor principal para las asignaciones restantes
+        available_servers = [s for s in self.servers if s.id != best_server.id]
+        
+        # Ordenar servidores por espacio disponible y rendimiento
+        server_capacity = []
+        for server in available_servers:
+            # Calcular capacidad efectiva
+            capacity_score = (
+                server.available_vcpus / server.total_vcpus +
+                server.available_ram / server.total_ram +
+                server.available_disk / server.total_disk
+            ) / 3.0 * server.performance_factor
+            
+            server_capacity.append((server, capacity_score))
+        
+        # Ordenar por capacidad disponible (mayor primero)
+        server_capacity.sort(key=lambda x: x[1], reverse=True)
+        
+        # Asignar cada VM restante al mejor servidor disponible
+        for vm in remaining_vms:
+            assigned = False
+            
+            # Crear mini-slice para esta VM
+            mini_slice = Slice(
+                id=self.slice.id,
+                name=f"mini_{vm.name}",
+                vms=[vm],
+                user_profile=self.slice.user_profile,
+                workload_type=self.slice.workload_type
+            )
+            
+            # Buscar el mejor servidor para esta VM
+            best_score = -1
+            best_server_for_vm = None
+            
+            for server, _ in server_capacity:
+                if server.can_host_slice(mini_slice):
+                    score = server.get_slice_fit_score(mini_slice)
+                    if score > best_score:
+                        best_score = score
+                        best_server_for_vm = server
+            
+            if best_server_for_vm:
+                assignments[vm.id] = best_server_for_vm.id
+                assigned = True
+                Logger.success(f"VM {vm.name} (ID: {vm.id}) asignada a servidor secundario {best_server_for_vm.name} (ID: {best_server_for_vm.id})")
+                
+                # Actualizar el uso de recursos del servidor seleccionado
+                usage_factors = UserProfile.get_resource_usage_factors(self.slice.user_profile)
+                variability = UserProfile.get_workload_variability(self.slice.user_profile)
+                
+                best_server_for_vm.used_vcpus += vm.flavor.vcpus * usage_factors["vcpu"] * variability
+                best_server_for_vm.used_ram += vm.flavor.ram * usage_factors["ram"] * variability
+                best_server_for_vm.used_disk += vm.flavor.disk * usage_factors["disk"] * variability
+            
+            if not assigned:
+                Logger.error(f"No se pudo asignar la VM {vm.name} (ID: {vm.id}) a ningún servidor")
+                unassigned = [vm for vm in remaining_vms if vm.id not in assignments]
+                unassigned_names = [vm.name for vm in unassigned]
+                error_msg = f"No se pudieron asignar todas las VMs restantes: {', '.join(unassigned_names)}"
+                return self._create_failure_result(error_msg, unassigned)
+        
+        # Calcular servidores utilizados
+        used_servers = len(set(assignments.values()))
+        
+        # Calcular puntuación de la solución
+        # Más alto si hay mayor proporción de VMs en el servidor principal
+        primary_server_count = len(best_vm_subset)
+        total_vms = len(self.slice.vms)
+        locality_score = primary_server_count / total_vms
+        
+        Logger.success(f"Slice distribuido en {used_servers} servidores con {primary_server_count} VMs en el servidor principal")
+        
+        return PlacementResult(
+            success=True,
+            assignments=assignments,
+            message=f"Slice distribuido en {used_servers} servidores, maximizando localidad con {primary_server_count} de {total_vms} VMs en servidor principal",
+            objective_value=locality_score
+        )
+    
+    def _create_failure_result(self, message: str, problematic_vms: List[VirtualMachine] = None) -> PlacementResult:
+        """
+        Crea un resultado detallado de fallo explicando las razones
+        """
+        # Si no se especifican VMs problemáticas, considerar todas
+        if problematic_vms is None:
+            problematic_vms = self.slice.vms
+        
+        # Análisis detallado de por qué no se pueden asignar las VMs
+        unassigned_details = []
+        
+        for vm in problematic_vms:
+            # Crear un mini-slice con solo esta VM
+            mini_slice = Slice(
+                id=self.slice.id,
+                name=f"mini_{vm.name}",
+                vms=[vm],
+                user_profile=self.slice.user_profile,
+                workload_type=self.slice.workload_type
+            )
+            
+            # Estimación de uso real
+            usage_factors = UserProfile.get_resource_usage_factors(self.slice.user_profile)
+            variability = UserProfile.get_workload_variability(self.slice.user_profile)
+            
+            real_vcpus = vm.flavor.vcpus * usage_factors["vcpu"] * variability
+            real_ram = vm.flavor.ram * usage_factors["ram"] * variability
+            real_disk = vm.flavor.disk * usage_factors["disk"] * variability
+            
+            # Razones de fallo para esta VM
+            reasons = []
+            
+            # Verificar cada servidor
+            for server in self.servers:
+                if not server.can_host_slice(mini_slice):
+                    # Obtener límites de sobreaprovisionamiento
+                    limits = UserProfile.get_overprovisioning_limits(self.slice.user_profile)
+                    
+                    # Calcular capacidades disponibles según SLA
+                    available_vcpus = server.total_vcpus * limits["vcpu"] - server.used_vcpus
+                    available_ram = server.total_ram * limits["ram"] - server.used_ram
+                    available_disk = server.total_disk * limits["disk"] - server.used_disk
+                    
+                    # Identificar qué recursos son insuficientes
+                    if real_vcpus > available_vcpus:
+                        reasons.append(f"vCPUs insuficientes en servidor {server.name}: requiere {real_vcpus:.1f}, disponible {available_vcpus:.1f}")
+                    
+                    if real_ram > available_ram:
+                        reasons.append(f"RAM insuficiente en servidor {server.name}: requiere {real_ram:.1f} MB, disponible {available_ram:.1f} MB")
+                    
+                    if real_disk > available_disk:
+                        reasons.append(f"Disco insuficiente en servidor {server.name}: requiere {real_disk:.1f} GB, disponible {available_disk:.1f} GB")
+            
+            # Si no hay razones específicas, usar mensaje genérico
+            if not reasons:
+                reasons.append("No se encontró un servidor compatible según los requisitos de SLA")
+            
+            # Eliminar duplicados y agregar al resultado
+            unassigned_details.append({
+                "vm_id": vm.id,
+                "vm_name": vm.name,
+                "reasons": list(set(reasons))
+            })
+        
+        return PlacementResult(
+            success=False,
+            message=message,
+            unassigned_details=unassigned_details
+        )
+
 class DataManager:
     """
     Gestiona la conversión entre diferentes formatos de datos para VM placement
@@ -1534,10 +2242,14 @@ def health_check():
 @app.route('/placement', methods=['POST'])
 def solve_placement():
     """
-    Endpoint para resolver el problema de placement de VMs
+    Endpoint para resolver el problema de placement para un slice completo
     
     Cuerpo del request:
     {
+        "slice_id": 123,
+        "slice_name": "slice-123",
+        "user_profile": "investigador",  // alumno, jp, maestro, investigador
+        "workload_type": "cpu_intensive", // general, cpu_intensive, memory_intensive, io_intensive
         "virtual_machines": [
             {
                 "id": 1,
@@ -1550,12 +2262,9 @@ def solve_placement():
     
     Returns:
         Response: Resultado del placement
-            200: Placement exitoso
-            400: Datos de entrada inválidos
-            500: Error interno
     """
     try:
-        Logger.major_section("API: VM PLACEMENT")
+        Logger.major_section("API: SLICE PLACEMENT")
         
         # Obtener JSON del request
         request_data = request.get_json()
@@ -1588,7 +2297,6 @@ def solve_placement():
                 "details": "No se pudieron obtener los servidores físicos de la base de datos"
             }), 500
         
-        # Crear un JSON estructurado con los flavors de la BD y las VMs del request
         try:
             # Obtener flavors desde la BD
             db_flavors = DatabaseManager.get_active_flavors()
@@ -1622,13 +2330,33 @@ def solve_placement():
                     "details": "No se pudieron cargar las máquinas virtuales del request"
                 }), 400
             
-            # Mostrar resumen de datos
-            Logger.section("Resumen de datos para placement")
-            Logger.info(f"Total de VMs: {len(vms)}")
-            Logger.info(f"Total de servidores: {len(servers)}")
+            # Crear objeto Slice con los parámetros recibidos
+            slice_id = request_data.get('slice_id', 1)
+            slice_name = request_data.get('slice_name', f"slice-{slice_id}")
+            user_profile = request_data.get('user_profile', UserProfile.ALUMNO)
+            workload_type = request_data.get('workload_type', WorkloadType.GENERAL)
             
-            # Resolver el problema
-            solver = VMPlacementSolver(vms, servers)
+            # Crear objeto Slice
+            slice = Slice(
+                id=slice_id,
+                name=slice_name,
+                vms=vms,
+                user_profile=user_profile,
+                workload_type=workload_type
+            )
+            
+            # Mostrar resumen de datos
+            Logger.section("Resumen de datos para placement de slice")
+            Logger.info(f"Slice: {slice.name} (ID: {slice.id})")
+            Logger.info(f"Perfil de usuario: {slice.user_profile}, Tipo de workload: {slice.workload_type}")
+            Logger.info(f"Total de VMs en el slice: {len(slice.vms)}")
+            
+            # Recursos estimados
+            estimated_usage = slice.get_estimated_usage()
+            Logger.info(f"Uso estimado - vCPUs: {estimated_usage['vcpu']:.1f}, RAM: {estimated_usage['ram']:.1f} MB, Disco: {estimated_usage['disk']:.1f} GB")
+            
+            # Resolver el problema con el nuevo solucionador de slices
+            solver = SliceBasedPlacementSolver(slice, servers)
             result = solver.solve()
             
             # Generar respuesta según el resultado
@@ -1636,44 +2364,37 @@ def solve_placement():
                 # Convertir resultado a formato JSON para respuesta
                 result_dict = result.to_dict(vms=vms, servers=servers)
                 
-                # Intentar generar visualización y guardarla
+                # Intentar generar visualización
                 try:
-                    solver.visualize_placement(result)
+                    # Usamos la visualización existente
+                    VMPlacementSolver(vms, servers).visualize_placement(result)
                     Logger.success("Visualización generada correctamente")
-                    Logger.success(f"Placement realizado exitosamente: {len(result.assignments)} VMs asignadas")
                 except Exception as viz_error:
                     Logger.warning(f"No se pudo generar la visualización: {str(viz_error)}")
                 
+                Logger.success(f"Slice placement completado exitosamente con {len(result.assignments)} VMs asignadas")
+                
                 return jsonify({
                     "status": "success",
-                    "message": f"Se realizó el placement de {len(result.assignments)} VMs",
+                    "message": f"Se realizó el placement del slice completo ({len(result.assignments)} VMs)",
                     "content": result_dict
                 }), 200
             else:
-                # Si hay VMs no asignadas, se crea un mensaje detallado
-                unassigned_count = len(result.unassigned_details) if hasattr(result, 'unassigned_details') else 0
-                if unassigned_count > 0:
-                    Logger.error(f"Placement fallido: {unassigned_count} VMs no pudieron ser asignadas")
-                    details = f"{unassigned_count} VMs no pudieron ser asignadas."
-                    return jsonify({
-                        "status": "error",
-                        "message": "Error al resolver el placement",
-                        "details": details,
-                        "content": result.unassigned_details
-                    }), 400
-                else:
-                    details = result.message
-                    return jsonify({
-                        "status": "error",
-                        "message": "Error al resolver el placement",
-                        "details": details,
-                    }), 400
+                # Respuesta detallada del error
+                Logger.failed(f"No se pudo realizar el placement del slice: {result.message}")
+                
+                return jsonify({
+                    "status": "error",
+                    "message": "Error al resolver el placement del slice",
+                    "details": result.message,
+                    "unassigned_details": result.unassigned_details if hasattr(result, 'unassigned_details') else []
+                }), 400
             
         except Exception as e:
-            Logger.error(f"Error procesando los datos: {str(e)}")
+            Logger.error(f"Error procesando los datos del slice: {str(e)}")
             return jsonify({
                 "status": "error",
-                "message": "Error al procesar los datos",
+                "message": "Error al procesar los datos del slice",
                 "details": str(e)
             }), 400
         
@@ -1689,19 +2410,36 @@ def solve_placement():
 @app.route('/test-data', methods=['GET'])
 def get_test_data():
     """
-    Endpoint para obtener datos de prueba que pueden usarse con el endpoint de placement
+    Endpoint para obtener datos de prueba para slice placement
     """
     try:
         # Generar datos de prueba con flavors de la BD
-        num_vms = np.random.randint(1,8)
+        num_vms = random.randint(3, 8)
+        
+        # Generar datos base
         test_data_json = DataManager.generate_test_data(num_vms=num_vms, num_servers=0, seed=None)
         test_data = json.loads(test_data_json)
         
+        # Seleccionar perfil de usuario y workload aleatorios
+        user_profiles = [UserProfile.ALUMNO, UserProfile.JP, UserProfile.MAESTRO, UserProfile.INVESTIGADOR]
+        workload_types = [WorkloadType.GENERAL, WorkloadType.CPU_INTENSIVE, WorkloadType.MEMORY_INTENSIVE, WorkloadType.IO_INTENSIVE]
+        
+        slice_id = random.randint(1, 1000)
+        slice_name = f"test-slice-{slice_id}"
+        user_profile = random.choice(user_profiles)
+        workload_type = random.choice(workload_types)
+        
+        # Crear respuesta
         response_data = {
+            "slice_id": slice_id,
+            "slice_name": slice_name,
+            "user_profile": user_profile,
+            "workload_type": workload_type,
             "virtual_machines": test_data["virtual_machines"]
         }
         
-        Logger.success(f"Datos de prueba para VM Placement generados con éxito!")
+        Logger.success(f"Datos de prueba para Slice Placement generados con éxito!")
+        Logger.info(f"Slice: {slice_name}, Perfil: {user_profile}, Workload: {workload_type}, VMs: {num_vms}")
 
         return jsonify({
             "status": "success",
