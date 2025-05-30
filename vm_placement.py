@@ -46,7 +46,7 @@
 # ===================== IMPORTACIONES =====================
 from flask import Flask, request, jsonify
 
-# Networking y sistema:
+# Sistema:
 import os
 import traceback
 
@@ -389,7 +389,8 @@ class PlacementResult:
     assignments: Dict[int, int] = field(default_factory=dict)  # VM_id -> Server_id
     message: str = ""
     objective_value: float = 0.0
-    
+    unassigned_details: List[Dict] = field(default_factory=list)
+
     def to_dict(self, vms=None, servers=None):
         """
         Convierte el resultado a un diccionario para respuesta JSON con información detallada
@@ -404,6 +405,9 @@ class PlacementResult:
             "message": self.message,
             "objective_value": round(self.objective_value, 2)
         }
+        
+        if self.unassigned_details:
+            result_dict["unassigned_details"] = self.unassigned_details
         
         # Si tenemos VMs y servidores disponibles, generamos información más detallada
         if vms and servers and self.assignments:
@@ -789,6 +793,9 @@ class VMPlacementSolver:
                 if unassigned_vms:
                     Logger.section("Análisis de VMs no asignadas")
                     
+                    # Lista para almacenar detalles de por qué cada VM no fue asignada
+                    unassigned_details = []
+                    
                     for vm in unassigned_vms:
                         Logger.warning(f"Analizando por qué VM {vm.name} (ID: {vm.id}) no pudo ser asignada:")
                         
@@ -805,33 +812,47 @@ class VMPlacementSolver:
                             if vm.flavor.disk <= server.available_disk:
                                 can_fit_by_disk = True
                         
+                        # Crear los detalles de por qué no fue asignada esta VM
+                        vm_reason = {
+                            "vm_id": vm.id,
+                            "vm_name": vm.name,
+                            "reasons": []
+                        }
+                        
                         if not can_fit_by_vcpu:
-                            Logger.error(f"  - VM requiere {vm.flavor.vcpus} vCPUs pero ningún servidor tiene suficiente capacidad disponible")
+                            reason = f"VM requiere {vm.flavor.vcpus} vCPUs pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
                         if not can_fit_by_ram:
-                            Logger.error(f"  - VM requiere {vm.flavor.ram} MB de RAM pero ningún servidor tiene suficiente capacidad disponible")
+                            reason = f"VM requiere {vm.flavor.ram} MB de RAM pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
                         if not can_fit_by_disk:
-                            Logger.error(f"  - VM requiere {vm.flavor.disk:.1f} GB de disco pero ningún servidor tiene suficiente capacidad disponible")
+                            reason = f"VM requiere {vm.flavor.disk:.1f} GB de disco pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
                         
                         # Si la VM puede caber en servidores individuales pero no fue asignada
                         if can_fit_by_vcpu and can_fit_by_ram and can_fit_by_disk:
-                            Logger.error("  - La VM podría caber individualmente, pero la solución óptima encontrada por el algoritmo no la incluye " +
-                                        "debido a restricciones globales o para maximizar la utilidad total")
+                            reason = "La VM podría caber individualmente, pero la solución óptima encontrada por el algoritmo no la incluye debido a restricciones globales o para maximizar la utilidad total"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
+                        
+                        unassigned_details.append(vm_reason)
                     
                     # Generar mensaje de error apropiado
                     message = f"No se pudieron asignar todas las VMs. {len(unassigned_vms)} de {n_vms} VMs no fueron asignadas debido a restricciones de capacidad o para mantener la solución óptima."
                     
-                    # Decidir si la solución es parcialmente exitosa o fallida
-                    if vm_count > 0:
-                        Logger.warning(message)
-                        return PlacementResult(
-                            success=True,  # Consideramos éxito parcial
-                            assignments=assignments,
-                            message=message,
-                            objective_value=objective_value
-                        )
-                    else:
-                        Logger.failed("No se pudo asignar ninguna VM")
-                        return PlacementResult(success=False, message="No se pudo asignar ninguna VM")
+                    # CAMBIO PRINCIPAL: Ahora consideramos que cualquier VM sin asignar es un fallo
+                    # Devolvemos un resultado fallido pero con los datos de asignaciones parciales
+                    Logger.failed(message)
+                    return PlacementResult(
+                        success=False,  # Ahora siempre es False si hay VMs sin asignar
+                        assignments=assignments,
+                        message=message,
+                        objective_value=objective_value,
+                        unassigned_details=unassigned_details  # Agregar detalles de VMs no asignadas
+                    )
                 
                 # Si todas las VMs fueron asignadas
                 return PlacementResult(
@@ -847,6 +868,7 @@ class VMPlacementSolver:
         except Exception as e:
             Logger.error(f"Error al resolver el problema: {str(e)}")
             return PlacementResult(success=False, message=f"Error: {str(e)}")
+
 
     def visualize_placement(self, result: PlacementResult):
         """
@@ -1105,8 +1127,8 @@ class VMPlacementSolver:
                 table_data.append([
                     vm["vm_name"],
                     f"{vm['vcpus']}",
-                    f"{vm['ram']/1000:.3f} GB",  # 3 decimales para RAM
-                    f"{vm['disk']:.2f} GB",      # 2 decimales para Disco
+                    f"{vm['ram']/1000:.3f} GB", 
+                    f"{vm['disk']:.1f} GB",     
                     vm["server_name"]
                 ])
 
@@ -1642,12 +1664,24 @@ def solve_placement():
                     "content": result_dict
                 }), 200
             else:
-                Logger.error(f"No se pudo resolver el problema de VM Placement")
-                return jsonify({
-                    "status": "error",
-                    "message": "Error al resolver el placement",
-                    "details": result.message
-                }), 400
+                # Si hay VMs no asignadas, se crea un mensaje detallado
+                unassigned_count = len(result.unassigned_details) if hasattr(result, 'unassigned_details') else 0
+                if unassigned_count > 0:
+                    Logger.error(f"Placement fallido: {unassigned_count} VMs no pudieron ser asignadas")
+                    details = f"{unassigned_count} VMs no pudieron ser asignadas."
+                    return jsonify({
+                        "status": "error",
+                        "message": "Error al resolver el placement",
+                        "details": details,
+                        "content": result.unassigned_details
+                    }), 400
+                else:
+                    details = result.message
+                    return jsonify({
+                        "status": "error",
+                        "message": "Error al resolver el placement",
+                        "details": details,
+                    }), 400
             
         except Exception as e:
             Logger.error(f"Error procesando los datos: {str(e)}")
