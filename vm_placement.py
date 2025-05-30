@@ -204,20 +204,6 @@ class DatabaseManager:
                     server['used_disk'] = round(random.uniform(1.0, max_used), 1)
                     Logger.warning(f"Server {server['name']}: Valor used_disk asignado provisionalmente: {server['used_disk']} (máx 60% de {server['total_disk']})")
                 
-                # Validación extra: verificar que los valores asignados no excedan el 60%
-                # Si por alguna razón los valores en la BD exceden el 60%, los ajustamos
-                if server['used_vcpus'] > int(server['total_vcpus'] * 0.6):
-                    server['used_vcpus'] = int(server['total_vcpus'] * 0.6)
-                    Logger.warning(f"Server {server['name']}: used_vcpus ajustado a {server['used_vcpus']} (60% del total)")
-                    
-                if server['used_ram'] > int(server['total_ram'] * 0.6):
-                    server['used_ram'] = int(server['total_ram'] * 0.6)
-                    Logger.warning(f"Server {server['name']}: used_ram ajustado a {server['used_ram']} (60% del total)")
-                    
-                if float(server['used_disk']) > float(server['total_disk']) * 0.6:
-                    server['used_disk'] = round(float(server['total_disk']) * 0.6, 1)
-                    Logger.warning(f"Server {server['name']}: used_disk ajustado a {server['used_disk']} (60% del total)")
-            
             Logger.info(f"Se obtuvieron {len(servers)} servidores físicos desde la BD")
             return servers
         except Exception as e:
