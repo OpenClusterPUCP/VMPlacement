@@ -1,108 +1,145 @@
-# Algoritmos de VM Placement para Entornos Cloud
+# 🖥️ VM Placement utilizando MILP 🖥️
 
-Explicación de las ideas/borradores para el VM placement (aun no se usan la data real del módulo de monitoreo).
 
-## 🚀 VM Placement de Santi "nivel kinder" (`vm_placement.py`)
+Este repositrio implementa un algoritmo de asignación de máquinas virtuales (VMs) a servidores físicos utilizando Programación Lineal Entera Mixta (MILP). El sistema está diseñado para minimzar el número de servidores físicos necesarios para desplegar un conjunto de VMs relacionadas (slice), considerando los perfiles de usuario y recursos disponibles en tiempo real.
 
-### Enfoque y Fundamentos
+---
 
-El algoritmo de VM Placement implementa una solucion basada en **Programación Lineal Entera Mixta (MILP)** para asignar máquinas virtuales individuales a servidores físicos de manera óptima. Este enfoque matemático garantiza encontrar la solución más eficiente posible dentro de las restricciones establecidas.
+## 📋 Tabla de Contenidos
 
-### Funcionamiento del Algoritmo
+- Funcionamiento Principal
+- Modelo Matemático
+  - Variables de decisión
+  - Función objetivo
+  - Restricciones
+- Implementación Técnica
+- Consideraciones adicionales
 
-1. **Definición de la Función Objetivo**:
-   - Maximiza la utilidad total de las asignaciones
-   - La utilidad se calcula considerando los recursos (vCPUs, RAM, disco) y puede incluir factores adicionales como rol de usuario o prioridad
+---
 
-2. **Restricciones del Modelo**:
-   - Cada VM puede asignarse a máximo un servidor
-   - No exceder los límites de vCPUs disponibles en cada servidor
-   - No exceder los límites de RAM disponible en cada servidor
-   - No exceder los límites de disco disponible en cada servidor
+## 🔄 Funcionamiento Principal
 
-3. **Proceso de Resolución**:
-   - Formulación matematica mediante matrices de coeficientes y restricciones
-   - Resolución usando el optimizador MILP de SciPy
-   - Extracción y validación de la solución generada
+El algoritmo funciona de la siguente manera:
 
-### Consideraciones de Rendimiento
+1. **Entrada de datos**: Recibe un conjunto de VMs con sus requerimientos (vCPUs, RAM, disco) a través de una API REST.
 
-- **Recursos Disponibles**: Evalúa los recursos actualmente disponibles en cada servidor (disponible = total - usado)
-- **Criterio de Rechazo**: Si los recursos totales no son suficientes, rechaza la solicitud completa
-- **Detalle de Fallos**: Genera información detallada sobre las razones por las que una VM no puede ser asignada
+2. **Ajuste por perfil de usuario**: Aplica factores de uso estimado según el perfil del usuario:
+   - 👨‍🎓 **Alumno**: 60%
+   - 👨‍🏫 **JP**: 70%
+   - 👨‍🔬 **Maestro**: 80%
+   - 🧪 **Investigador**: 100%
 
-### Limitaciones
+3. **Validación de recursos disponibles**: Consulta los recursos en tiempo real y verifica si existe capacidad suficiente.
 
-Este algoritmo trata cada VM de manera individual, sin considerar relaciones entre ellas, lo que puede resultar en una fragmentacion de VMs relacionadas entre diferentes servidores. No considera el concepto de "slices" o grupos de VMs que deberian permanecer juntas para un mejor rendimiento.
+4. **Optimización MILP**: Formula y resuelve el problema de minimización del número de servidores físicos mediante MILP.
 
-## 🔄 Slice-Based Placement (`slice_placement.py`)
+5. **Visualización de resultados**: Genera gráficos de asignación y uso de recursos.
 
-### Enfoque y Fundamentos
+---
 
-El algoritmo de Slice-Based Placement implementa una estrategia **"Cluster-First"** diseñada específicamente para optimizar la asignación de grupos relacionados de VMs (slices) a servidores físicos, priorizando la localidad de las VMs y la gestión eficiente de recursos considerando el ciclo de vida del slice.
+## 📐 Modelo Matemático
 
-### Funcionamiento del Algoritmo
+El problema se formula siguiendo estas ecuaciones:
 
-1. **Evaluación de Capacidad**:
-   - Analiza si algún servidor individual puede alojar el slice completo
-   - Considera límites de sobreaprovisionamiento específicos para el perfil del usuario
+### Variables de decisión
 
-2. **Estrategia Cluster-First**:
-   - Identifica el servidor que puede alojar la mayor cantidad de VMs del slice
-   - Prioriza mantener juntas las VMs relacionadas en un mismo servidor
-   - Distribuye las VMs restantes utilizando el mínimo número de servidores adicionales
+$$x_{i,j} = \begin{cases}
+1 & \text{si la VM } i \text{ es asignada al servidor } j \\
+0 & \text{en caso contrario}
+\end{cases}$$
 
-3. **Gestión Avanzada de Recursos**:
-   - Considera el uso estimado real basado en perfiles de usuario (alumno, JP, maestro, investigador)
-   - Aplica factores de variabilidad para anticipar picos durante el ciclo de vida
-   - Implemnta límites de sobreaprovisionamiento diferenciados según el SLA
+$$y_{j} = \begin{cases}
+1 & \text{si el servidor } j \text{ es utilizado} \\
+0 & \text{en caso contrario}
+\end{cases}$$
 
-### Consideraciones de Rendimiento y SLA
+Donde:
+- $i = 1, 2, ..., n$ representa las máquinas virtuales
+- $j = 1, 2, ..., m$ representa los servidores físicos
 
-- **Sobreaprovisionamiento (falta ajustarlo, se puso loca la cosa)**:
+### Función objetivo
 
-- **Estimacion de Congestión**:
-  - Calcula la congestión estimada para cada tipo de recurso tras asignar el slice
-  - Estima tiempos de espera en cola utilizando un modelo no lineal
-  - Considera el rendimiento relativo de cada servidor
+Minimizar el número de servidores físicos utilizados:
 
-- **Criterios de Éxito**:
-  - Maximizar la localidad (mayor cantidad de VMs en un solo servidor)
-  - Minimizar el número de servidores utilizados
-  - Garantizar que los recuros reales necesarios no excedan límites seguros
+$$\min Z = \sum_{j=1}^{m} y_j$$
 
-### Ventajas Clave
+### Restricciones
 
-- ✅ **Tratamiento de Slices como Unidad**: Reconoce y mantiene la relación entre VMs del mismo slice
-- ✅ **Estimacion de Uso Real**: No se basa únicamente en los recursos solicitados por el flavor sino en estimaciones de uso real
-- ✅ **Gestión del Ciclo de Vida**: Anticipa la variabilidad del uso de recursos durante la vida del slice
-- ✅ **Informes Detallados de Fallos**: Proporciona explicaciones precisas sobre por que no se puede asignar un slice
+#### ⚠️ Restricción de asignación obligatoria 
+Cada VM debe asignarse exactamente a un servidor:
 
-Este algoritmo resulta especialmente adecuado para entornos donde la localidad entre VMs relacionadas es crítica y donde los patrones de uso son variables según el tipo de usuario y carga de trabajo.
+$$\sum_{j=1}^{m} x_{i,j} = 1 \quad \forall i \in \{1,2,...,n\}$$
 
-## 📊 Visualizaciones y Análisis
+#### ⚡ Restricción de activación de servidor 
+Si una VM es asignada a un servidor, ese servidor debe estar activo:
 
-Ambos algoritmos incluyen capacidades de visualizacion que permiten:
+$$x_{i,j} \leq y_j \quad \forall i \in \{1,2,...,n\}, \forall j \in \{1,2,...,m\}$$
 
-- Análisis gráfico del uso de recursos por servidor
-- Distribución de VMs en los servidores
-- Tablas detalladas de asignaciones
-- Exportación de resultados a imágenes para informes
+#### 🔢 Restricción de capacidad de vCPUs 
+No exceder la capacidad disponible de vCPUs en cada servidor:
 
-## 📈 Cumplimiento de Requisitos
+$$\sum_{i=1}^{n} vcpu_i \cdot f_p \cdot x_{i,j} \leq CPU_j \cdot y_j \quad \forall j \in \{1,2,...,m\}$$
 
-| Requisito | Implementación |
-|-----------|---------------|
-| **Recursos disponibles y asignados** | Ambos algoritmos consideran los recursos actualmente disponibles y ya asignados en cada servidor para evitar congestión. |
-| **Función objetivo bien definida** | El algoritmo MILP maximiza la utilidad total, mientras que el Slice-Based maximiza la localidad y minimiza servidores. |
-| **Slices como unidad** | El algoritmo Slice-Based trata todo el conjunto de VMs como una unidad cohesiva, manteniendo las VMs relacionadas en el mismo servidor cuando es posible. |
-| **Ciclo de vida y congestión** | Se implementan factores de variabilidad y perfiles de usuario que anticipan la congestión durante el ciclo de vida completo del slice. |
-| **Asignación segun disponibilidad** | Ambos algoritmos realizan una asignación óptima cuando hay capacidad disponible. |
-| **Rechazo con explicación** | Cuando no hay recursos suficientes, se genera un informe detallado explicando las razones específicas del rechazo. |
+#### 💾 Restricción de capacidad de RAM 
+No exceder el 80% de la capacidad disponible de RAM:
 
-## 🔍 Casos de Uso Recomendados
+$$\sum_{i=1}^{n} ram_i \cdot f_p \cdot x_{i,j} \leq 0.8 \cdot RAM_j \cdot y_j \quad \forall j \in \{1,2,...,m\}$$
 
-- **VM Placement (MILP)**: Ideal para entornos heterogéneos donde la optimizacion individual de recursos es prioritaria.
-- **Slice-Based Placement**: Recomendado para aplicaciones distribuidas donde la localidad entre VMs relacionadas mejora significativamente el rendimiento.
+#### 💿 Restricción de capacidad de disco 
+No exceder el 80% de la capacidad disponible de disco:
+
+$$\sum_{i=1}^{n} disk_i \cdot f_p \cdot x_{i,j} \leq 0.8 \cdot DISK_j \cdot y_j \quad \forall j \in \{1,2,...,m\}$$
+
+> **Donde:**
+>
+> - $vcpu_i$, $ram_i$, $disk_i$: Recursos requeridos por la VM $i$
+> - $CPU_j$, $RAM_j$, $DISK_j$: Capacidades disponibles del servidor $j$
+> - $f_p$: Factor de uso según el perfil del usuario (0.6 para alumno, 0.7 para jp, etc.)
+> - El factor 0.8 para RAM y disco representa el límite del 80% para evitar sobrecarga
+
+---
+
+## 💻 Implementación Técnica
+
+El sistema está implementado como una API REST utilizando Flask que ofrece los siguientes endpoints:
+
+| Endpoint | Descripción |
+|----------|-------------|
+| `/placement` | Resuelve el problema de placement para un slice completo |
+| `/test-data` | Genera datos de prueba para facilitar las pruebas |
+| `/health` | Verifica el estado del servicio |
+
+Ejemplo de solicitud al endpoint `/placement`:
+
+```json
+{
+    "slice_id": 123,
+    "slice_name": "slice-test",
+    "user_profile": "investigador",
+    "virtual_machines": [
+        {
+            "id": 1,
+            "name": "VM-1",
+            "flavor_id": 1
+        },
+        {
+            "id": 2,
+            "name": "VM-2",
+            "flavor_id": 2
+        }
+    ]
+}
+```
+
+La solución utiliza el solver MILP de SciPy para encontrar la asignación óptima de VMs a servidores. Los resultados se visualizan mediante matplotlib, generando gráficos detallados del uso de recursos y distribución de VMs.
+
+---
+
+## ⚙️ Consideraciones adicionales
+
+- 🔄 Los recursos en tiempo real se obtienen mediante una API externa (simulada en esta versión)
+- 🛡️ Se limita el uso de RAM y disco al 80% para mantener un margen de seguridad
+- 👤 El perfil de usuario permite estimar el uso real de recursos durante la vida del slice
+- 📊 La visualización genera gráficos detallados que facilitan el análisis de las asignaciones
 
 ---

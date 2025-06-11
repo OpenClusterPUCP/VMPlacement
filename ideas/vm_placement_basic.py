@@ -4,8 +4,8 @@
 # | DESCRIPCIÓN:
 # | Módulo API REST que implementa un algoritmo de asignación de máquinas virtuales
 # | a servidores físicos (VM Placement) utilizando técnicas de optimización MILP
-# | (Mixed-Integer Linear Programming). Gestiona la asignación óptima minimizando
-# | el número de servidores físicos necesarios según el perfil de usuario.
+# | (Mixed-Integer Linear Programming). Gestiona la asignación óptima maximizando
+# | la utilidad mientras cumple con restricciones de recursos.
 # ==============================================================================
 # | CONTENIDO PRINCIPAL:
 # | 1. CONFIGURACIÓN INICIAL
@@ -13,7 +13,6 @@
 # |    - Configuración de base de datos MySQL
 # |    - Pool de conexiones y transacciones
 # |    - Logger personalizado para debugging
-# |    - Factores de uso por perfil de usuario
 # |
 # | 2. MODELOS DE DATOS
 # |    - Flavor: Representa una configuración de recursos para VM
@@ -23,15 +22,15 @@
 # |
 # | 3. SUBMÓDULOS PRINCIPALES
 # |    - DatabaseManager: Gestiona conexiones y consultas a la BD
+# |    - UtilityCalculator: Calcula la utilidad de asignar una VM
 # |    - VMPlacementSolver: Resuelve el problema de placement con MILP
 # |    - DataManager: Conversión entre formatos de datos
 # |
 # | 4. ALGORITMO DE PLACEMENT
 # |    - Formulación MILP con restricciones de recursos
-# |    - Minimización del número de servidores utilizados
-# |    - Ajuste de recursos según perfil de usuario
-# |    - Validación de recursos disponibles en tiempo real
-# |    - Limitación a 80% de RAM y disco para seguridad
+# |    - Cálculo de utilidad para optimización
+# |    - Validación de recursos disponibles
+# |    - Análisis de asignaciones y restricciones
 # |
 # | 5. VISUALIZACIÓN DE RESULTADOS
 # |    - Generación de gráficas de uso de recursos
@@ -40,7 +39,7 @@
 # |
 # | 6. API ENDPOINTS
 # |    - /health: Verificación del servicio
-# |    - /placement: Endpoint para resolver el problema del placement por slice
+# |    - /placement: Endpoint para resolver el problema del placement uwu
 # |    - /test-data: Generación de datos de prueba
 # ==============================================================================
 
@@ -56,7 +55,7 @@ import json
 import random
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Tuple, Union, Optional
+from typing import List, Dict, Tuple, Optional
 
 # Bibliotecas científicas:
 import numpy as np
@@ -73,16 +72,6 @@ app = Flask(__name__)
 host = '0.0.0.0'
 port = 6001
 debug = False
-
-# ===================== CONFIGURACIÓN DE PERFILES DE USUARIO =====================
-# Factores de uso de recursos por perfil (porcentajes - ajustables)
-USER_PROFILE_USAGE_FACTORS = {
-    "alumno": 0.6,          # Los alumnos utilizan aproximadamente el 60% de los recursos solicitados
-    "jp": 0.7,              # Los jefes de práctica utilizan aproximadamente el 70%
-    "maestro": 0.8,         # Los maestros utilizan aproximadamente el 80%
-    "investigador": 1.0,    # Los investigadores utilizan el 100% de lo solicitado
-    "default": 1.0          # Valor por defecto si no se especifica perfil
-}
 
 # ===================== CONFIGURACIÓN BD =====================
 DB_CONFIG = {
@@ -332,9 +321,10 @@ class VirtualMachine:
     id: int
     name: str
     flavor: Flavor
+    utility: float = 0.0
     
     def __str__(self):
-        return f"VM {self.id}: {self.name} - {self.flavor.name}"
+        return f"VM {self.id}: {self.name} - {self.flavor.name} (Utilidad: {self.utility:.2f})"
 
 @dataclass
 class PhysicalServer:
@@ -365,48 +355,6 @@ class PhysicalServer:
         """Retorna la cantidad de espacio en disco disponible en GB"""
         return self.total_disk - self.used_disk
     
-    def get_real_time_resources(self) -> Dict[str, Union[int, float]]:
-        """
-        Obtiene recursos disponibles en tiempo real mediante API externa
-        NOTA: En una implementación real, esto consultaría una API de monitoreo.
-              Por ahora, simulamos con los valores actuales calculados.
-        """
-        # TODO: Reemplazar con llamada real a API de monitoreo cuando esté disponible
-        return {
-            "available_vcpus": self.available_vcpus,
-            "available_ram": self.available_ram,
-            "available_disk": self.available_disk
-        }
-    
-    # def get_real_time_resources(self) -> Dict[str, Union[int, float]]:
-    #     """
-    #     Obtiene recursos disponibles en tiempo real mediante API externa
-    #     NOTA: En una implementación real, esto consultaría una API de monitoreo.
-    #         Por ahora, simulamos con los valores actuales calculados con pequeñas variaciones.
-    #     """
-    #     # TODO: Reemplazar con llamada real a API de monitoreo cuando esté disponible
-        
-    #     # Simular variaciones en recursos disponibles para mayor realismo
-    #     import random
-        
-    #     # Variación de ±10% para simular cargas dinámicas
-    #     cpu_variation = random.uniform(0.9, 1.1)
-    #     ram_variation = random.uniform(0.9, 1.1)
-    #     disk_variation = random.uniform(0.9, 1.1)
-        
-    #     # Aplicar variaciones a los recursos disponibles (para simular recursos en tiempo real)
-    #     realtime_vcpus = max(0, int(self.available_vcpus * cpu_variation))
-    #     realtime_ram = max(0, int(self.available_ram * ram_variation))
-    #     realtime_disk = max(0.0, round(self.available_disk * disk_variation, 1))
-        
-    #     Logger.debug(f"Servidor {self.name}: Recursos en tiempo real - vCPUs: {realtime_vcpus}, RAM: {realtime_ram}, Disk: {realtime_disk}")
-        
-    #     return {
-    #         "available_vcpus": realtime_vcpus,
-    #         "available_ram": realtime_ram,
-    #         "available_disk": realtime_disk
-    #     }
-
     def __str__(self):
         # Calcular porcentajes de uso
         vcpu_pct = (self.used_vcpus / self.total_vcpus * 100) if self.total_vcpus > 0 else 0
@@ -428,9 +376,6 @@ class PlacementResult:
     message: str = ""
     objective_value: float = 0.0
     unassigned_details: List[Dict] = field(default_factory=list)
-    slice_id: int = None
-    slice_name: str = ""
-    user_profile: str = ""
 
     def to_dict(self, vms=None, servers=None):
         """
@@ -447,22 +392,11 @@ class PlacementResult:
             "objective_value": round(self.objective_value, 2)
         }
         
-        # Agregar información de slice si está disponible
-        if self.slice_id is not None:
-            result_dict["slice_id"] = self.slice_id
-        if self.slice_name:
-            result_dict["slice_name"] = self.slice_name
-        if self.user_profile:
-            result_dict["user_profile"] = self.user_profile
-        
         if self.unassigned_details:
             result_dict["unassigned_details"] = self.unassigned_details
         
         # Si tenemos VMs y servidores disponibles, generamos información más detallada
         if vms and servers and self.assignments:
-            # Obtener el factor de uso basado en el perfil del usuario
-            usage_factor = USER_PROFILE_USAGE_FACTORS.get(self.user_profile, USER_PROFILE_USAGE_FACTORS["default"])
-            
             # Crear asignaciones detalladas
             assignments_list = []
             unassigned_vms = []
@@ -532,10 +466,9 @@ class PlacementResult:
                         for vm_id in vm_ids:
                             if vm_id in vm_map:
                                 vm = vm_map[vm_id]
-                                # Aplicar factor de uso según perfil de usuario
-                                vcpus_used += vm.flavor.vcpus * usage_factor
-                                ram_used += vm.flavor.ram * usage_factor
-                                disk_used += vm.flavor.disk * usage_factor
+                                vcpus_used += vm.flavor.vcpus
+                                ram_used += vm.flavor.ram
+                                disk_used += vm.flavor.disk
                         
                         # Agregar a totales
                         total_used_vcpus += vcpus_used
@@ -545,10 +478,10 @@ class PlacementResult:
                         total_available_ram += server.available_ram
                         total_available_disk += server.available_disk
                         
-                        # Calcular porcentajes considerando factor de 0.8 para RAM y disco
+                        # Calcular porcentajes
                         vcpu_percent = (vcpus_used / server.available_vcpus * 100) if server.available_vcpus > 0 else 0
-                        ram_percent = (ram_used / (server.available_ram * 0.8) * 100) if server.available_ram > 0 else 0
-                        disk_percent = (disk_used / (server.available_disk * 0.8) * 100) if server.available_disk > 0 else 0
+                        ram_percent = (ram_used / server.available_ram * 100) if server.available_ram > 0 else 0
+                        disk_percent = (disk_used / server.available_disk * 100) if server.available_disk > 0 else 0
                         
                         servers_usage.append({
                             "id": server.id,
@@ -556,12 +489,12 @@ class PlacementResult:
                             "vms_count": len(vm_ids),
                             "resources": {
                                 "vcpus": {
-                                    "used": round(vcpus_used, 1),  # Redondear para mejor presentación
+                                    "used": vcpus_used,
                                     "total": server.available_vcpus,
                                     "percent": round(vcpu_percent, 2)
                                 },
                                 "ram": {
-                                    "used": int(ram_used),  # Convertir a entero para RAM
+                                    "used": ram_used,
                                     "total": server.available_ram,
                                     "percent": round(ram_percent, 2)
                                 },
@@ -573,22 +506,22 @@ class PlacementResult:
                             }
                         })
                 
-                # Calcular porcentajes totales considerando factor de 0.8 para RAM y disco
+                # Calcular porcentajes totales
                 total_vcpu_percent = (total_used_vcpus / total_available_vcpus * 100) if total_available_vcpus > 0 else 0
-                total_ram_percent = (total_used_ram / (total_available_ram * 0.8) * 100) if total_available_ram > 0 else 0
-                total_disk_percent = (total_used_disk / (total_available_disk * 0.8) * 100) if total_available_disk > 0 else 0
+                total_ram_percent = (total_used_ram / total_available_ram * 100) if total_available_ram > 0 else 0
+                total_disk_percent = (total_used_disk / total_available_disk * 100) if total_available_disk > 0 else 0
                 
                 # Agregar información de recursos
                 result_dict["resource_usage"] = {
                     "servers": servers_usage,
                     "total": {
                         "vcpus": {
-                            "used": round(total_used_vcpus, 1),
+                            "used": total_used_vcpus,
                             "total": total_available_vcpus,
                             "percent": round(total_vcpu_percent, 2)
                         },
                         "ram": {
-                            "used": int(total_used_ram),
+                            "used": total_used_ram,
                             "total": total_available_ram,
                             "percent": round(total_ram_percent, 2)
                         },
@@ -606,6 +539,65 @@ class PlacementResult:
         return result_dict
 
 # ===================== SUBMÓDULOS =====================
+class UtilityCalculator:
+    """
+    Calcula la utilidad de asignar una VM a un servidor físico
+    
+    Esta clase proporciona métodos para calcular la utilidad o valor
+    de colocar una VM en un servidor específico.
+    """
+    
+    @staticmethod
+    def calculate_basic(vm: VirtualMachine) -> float:
+        """
+        Cálculo básico de utilidad basado en el flavor de la VM
+        
+        Esta función implementa un cálculo básico de utilidad basado en los recursos
+        del flavor.
+        """
+        # Fórmula básica: utilidad proporcional a los recursos/flavors
+        # Podemos ajustar los pesos según la importancia relativa de cada recurso
+        cpu_weight = 0.7
+        ram_weight = 0.8
+        disk_weight = 0.7
+        
+        utility = (
+            cpu_weight * vm.flavor.vcpus + 
+            ram_weight * (vm.flavor.ram / 1024) +
+            disk_weight * vm.flavor.disk
+        )
+        
+        return utility
+    
+    @staticmethod
+    def calculate_advanced(vm: VirtualMachine, **kwargs) -> float:
+        """
+        Cálculo avanzado de utilidad que puede considerar factores adicionales
+        
+        Args:
+            vm: La máquina virtual
+            **kwargs: Factores adicionales como rol de usuario, prioridad, etc.
+        """
+        # Primero calculamos la utilidad básica
+        utility = UtilityCalculator.calculate_basic(vm)
+        
+        # Factores adicionales que pueden implementarse en el futuro
+        # Por ejemplo: rol de usuario
+        if 'user_role' in kwargs:
+            role_factor = {
+                'investigador': 2.0,
+                'jp': 1.5,
+                'alumno': 1.0
+            }.get(kwargs['user_role'], 1.0)
+            utility *= role_factor
+        
+        # Factor de prioridad
+        if 'priority' in kwargs:
+            priority = kwargs['priority']
+            utility *= (1 + priority / 10)  # Prioridad en escala 0-10
+            
+        return utility
+
 class VMPlacementSolver:
     """
     Resuelve el problema de la colocación de VMs utilizando MILP de SciPy
@@ -621,13 +613,15 @@ class VMPlacementSolver:
         """
         self.vms = vms
         self.servers = servers
+        
+        # Calcular utilidad para cada VM si no está definida
+        for vm in self.vms:
+            if vm.utility <= 0:
+                vm.utility = UtilityCalculator.calculate_basic(vm)
     
-    def solve(self, user_profile="default") -> PlacementResult:
+    def solve(self) -> PlacementResult:
         """
         Resuelve el problema de placement usando MILP con SciPy
-        
-        Args:
-            user_profile: Perfil del usuario para ajustar el uso estimado de recursos
         
         Returns:
             PlacementResult con los resultados de la colocación
@@ -638,59 +632,31 @@ class VMPlacementSolver:
             Logger.error("No hay VMs o servidores disponibles para resolver el problema")
             return PlacementResult(success=False, message="No hay VMs o servidores disponibles")
         
-        # Obtener el factor de uso basado en el perfil del usuario
-        usage_factor = USER_PROFILE_USAGE_FACTORS.get(user_profile, USER_PROFILE_USAGE_FACTORS["default"])
-        Logger.info(f"Perfil de usuario: {user_profile} - Factor de uso estimado: {usage_factor*100:.0f}%")
-        
         Logger.info(f"Resolviendo para {len(self.vms)} VMs y {len(self.servers)} servidores")
         
         # Verificar capacidad total de los servidores antes de resolver
-        # Aplicar el factor de uso a los recursos requeridos
-        total_vcpus_required = sum(vm.flavor.vcpus * usage_factor for vm in self.vms)
-        total_ram_required = sum(vm.flavor.ram * usage_factor for vm in self.vms)
-        total_disk_required = sum(vm.flavor.disk * usage_factor for vm in self.vms)
+        total_vcpus_required = sum(vm.flavor.vcpus for vm in self.vms)
+        total_ram_required = sum(vm.flavor.ram for vm in self.vms)
+        total_disk_required = sum(vm.flavor.disk for vm in self.vms)
         
-        # Obtener recursos en tiempo real para cada servidor
-        server_resources = []
-        Logger.info("Obteniendo recursos disponibles en tiempo real de los servidores:")
-        for server in self.servers:
-            real_time = server.get_real_time_resources()
-            
-            # Usar el menor valor entre lo disponible en BD y lo real
-            effective_vcpus = min(server.available_vcpus, real_time["available_vcpus"])
-            
-            # Para RAM y disco, considerar solo el 80% para evitar sobrecargas
-            effective_ram = min(server.available_ram, real_time["available_ram"]) * 0.8
-            effective_disk = min(server.available_disk, real_time["available_disk"]) * 0.8
-            
-            server_resources.append({
-                "vcpus": effective_vcpus,
-                "ram": effective_ram,
-                "disk": effective_disk
-            })
-            
-            Logger.info(f"Servidor {server.name}: Recursos efectivos - vCPUs: {effective_vcpus}, " +
-                        f"RAM: {int(effective_ram)} MB ({effective_ram/server.available_ram*100:.1f}%), " + 
-                        f"Disk: {effective_disk:.1f} GB ({effective_disk/server.available_disk*100:.1f}%)")
-
-        # Verificar la capacidad total ajustada
-        total_vcpus_available = sum(res["vcpus"] for res in server_resources)
-        total_ram_available = sum(res["ram"] for res in server_resources)
-        total_disk_available = sum(res["disk"] for res in server_resources)
-
-        Logger.info(f"Recursos disponibles ajustados - vCPUs: {total_vcpus_available}, RAM: {int(total_ram_available)} MB, Disco: {total_disk_available:.1f} GB")
-
-        # Verificar si hay suficientes recursos totales con los valores ajustados
+        total_vcpus_available = sum(server.available_vcpus for server in self.servers)
+        total_ram_available = sum(server.available_ram for server in self.servers)
+        total_disk_available = sum(server.available_disk for server in self.servers)
+        
+        Logger.info(f"Recursos requeridos - vCPUs: {total_vcpus_required}, RAM: {total_ram_required} MB, Disco: {total_disk_required:.1f} GB")
+        Logger.info(f"Recursos disponibles - vCPUs: {total_vcpus_available}, RAM: {total_ram_available} MB, Disco: {total_disk_available:.1f} GB")
+        
+        # Verificar si hay suficientes recursos totales
         insufficient_resources = []
         if total_vcpus_required > total_vcpus_available:
-            insufficient_resources.append(f"vCPUs (Requerido: {total_vcpus_required:.1f}, Disponible: {total_vcpus_available})")
+            insufficient_resources.append(f"vCPUs (Requerido: {total_vcpus_required}, Disponible: {total_vcpus_available})")
         if total_ram_required > total_ram_available:
-            insufficient_resources.append(f"RAM (Requerido: {total_ram_required:.1f} MB, Disponible: {int(total_ram_available)} MB)")
+            insufficient_resources.append(f"RAM (Requerido: {total_ram_required} MB, Disponible: {total_ram_available} MB)")
         if total_disk_required > total_disk_available:
             insufficient_resources.append(f"Disco (Requerido: {total_disk_required:.1f} GB, Disponible: {total_disk_available:.1f} GB)")
-
+        
         if insufficient_resources:
-            error_msg = f"No hay suficientes recursos en total para todas las VMs (considerando recursos en tiempo real): {', '.join(insufficient_resources)}"
+            error_msg = f"No hay suficientes recursos en total para todas las VMs: {', '.join(insufficient_resources)}"
             Logger.error(error_msg)
             return PlacementResult(success=False, message=error_msg)
         
@@ -698,21 +664,18 @@ class VMPlacementSolver:
             # Definir dimensiones del problema
             n_vms = len(self.vms)
             n_servers = len(self.servers)
+            n_vars = n_vms * n_servers  # Total de variables de decisión
             
-            # Nuevo: el número total de variables incluye las variables binarias para los servidores
-            n_vars = n_vms * n_servers + n_servers
-            
-            # Vector de coeficientes de la función objetivo
-            # Ahora el objetivo es minimizar el número de servidores usados
+            # Vector de coeficientes de la función objetivo (utilidades, negativas porque milp minimiza)
+            # Tenemos que hacer -p porque queremos maximizar la utilidad, pero milp minimiza
             c = np.zeros(n_vars)
-            
-            # Los primeros n_vms * n_servers coeficientes corresponden a las variables x_ij (coeficiente 0)
-            # Los últimos n_servers coeficientes corresponden a las variables y_j (coeficiente 1)
-            for j in range(n_servers):
-                c[n_vms * n_servers + j] = 1
+            for i in range(n_vms):
+                for j in range(n_servers):
+                    idx = i * n_servers + j
+                    c[idx] = -self.vms[i].utility
             
             # Todas las variables son binarias
-            integrality = np.ones(n_vars, dtype=bool)
+            integrality = np.ones(n_vars, dtype=bool)  # True para todas las variables (binarias)
             
             # Límites de las variables: entre 0 y 1 (variables binarias)
             bounds = Bounds(0, 1)
@@ -720,85 +683,55 @@ class VMPlacementSolver:
             # Lista para almacenar todas las restricciones
             all_constraints = []
             
-            # Restricción 1: Cada VM debe estar asignada exactamente a un servidor (=1 en vez de <=1)
+            # Restricción 1: Cada VM debe estar asignada a máximo un servidor
             for i in range(n_vms):
+                # Para cada VM, creamos una matriz de coeficientes donde solo las variables
+                # correspondientes a esa VM tienen coeficiente 1
                 A_vm = np.zeros((1, n_vars))
                 for j in range(n_servers):
                     idx = i * n_servers + j
                     A_vm[0, idx] = 1
                 
-                # La suma debe ser = 1 (una VM debe estar en exactamente un servidor)
-                constraint_vm = LinearConstraint(A_vm, 1, 1)
+                # La suma debe ser <= 1 (una VM puede estar en a lo sumo un servidor)
+                constraint_vm = LinearConstraint(A_vm, -np.inf, 1)
                 all_constraints.append(constraint_vm)
             
-            # Restricción 2: Activación de servidor - Si una VM es asignada a un servidor, ese servidor debe estar activo
-            for i in range(n_vms):
-                for j in range(n_servers):
-                    A_active = np.zeros((1, n_vars))
-                    idx_x = i * n_servers + j
-                    idx_y = n_vms * n_servers + j
-                    A_active[0, idx_x] = 1
-                    A_active[0, idx_y] = -1
-                    
-                    # x_ij <= y_j equivale a x_ij - y_j <= 0
-                    constraint_active = LinearConstraint(A_active, -np.inf, 0)
-                    all_constraints.append(constraint_active)
+            # Restricciones de capacidad para cada tipo de recurso en cada servidor
             
-            # Restricción 3: No exceder capacidad de vCPUs en cada servidor (solo si está activo)
-            # Aplicar factor de uso por perfil de usuario
+            # Restricción 2: No exceder capacidad de vCPUs en cada servidor
             for j in range(n_servers):
                 A_cpu = np.zeros((1, n_vars))
                 for i in range(n_vms):
                     idx = i * n_servers + j
-                    # Aplicar el factor de uso al requerimiento de vCPUs
-                    A_cpu[0, idx] = self.vms[i].flavor.vcpus * usage_factor
+                    A_cpu[0, idx] = self.vms[i].flavor.vcpus
                 
-                # Agregar variable y_j con coeficiente negativo del límite
-                idx_y = n_vms * n_servers + j
-                A_cpu[0, idx_y] = -self.servers[j].available_vcpus
-                
-                # Restricción: Suma(vcpu_i * x_ij) - CPU_j * y_j <= 0
-                constraint_cpu = LinearConstraint(A_cpu, -np.inf, 0)
+                # La suma ponderada de vCPUs no debe exceder la capacidad del servidor
+                constraint_cpu = LinearConstraint(A_cpu, -np.inf, self.servers[j].available_vcpus)
                 all_constraints.append(constraint_cpu)
             
-            # Restricción 4: No exceder capacidad de RAM en cada servidor (solo si está activo)
-            # Aplicar factor de uso por perfil de usuario
+            # Restricción 3: No exceder capacidad de RAM en cada servidor
             for j in range(n_servers):
                 A_ram = np.zeros((1, n_vars))
                 for i in range(n_vms):
                     idx = i * n_servers + j
-                    # Aplicar el factor de uso al requerimiento de RAM
-                    A_ram[0, idx] = self.vms[i].flavor.ram * usage_factor
+                    A_ram[0, idx] = self.vms[i].flavor.ram
                 
-                # Agregar variable y_j con coeficiente negativo del límite
-                # Usar solo el 80% de la RAM disponible
-                idx_y = n_vms * n_servers + j
-                A_ram[0, idx_y] = -server_resources[j]["ram"] 
-                
-                # Restricción: Suma(ram_i * x_ij) - (RAM_j * 0.8) * y_j <= 0
-                constraint_ram = LinearConstraint(A_ram, -np.inf, 0)
+                # La suma ponderada de RAM no debe exceder la capacidad del servidor
+                constraint_ram = LinearConstraint(A_ram, -np.inf, self.servers[j].available_ram)
                 all_constraints.append(constraint_ram)
             
-            # Restricción 5: No exceder capacidad de disco en cada servidor (solo si está activo)
-            # Aplicar factor de uso por perfil de usuario
+            # Restricción 4: No exceder capacidad de disco en cada servidor
             for j in range(n_servers):
                 A_disk = np.zeros((1, n_vars))
                 for i in range(n_vms):
                     idx = i * n_servers + j
-                    # Aplicar el factor de uso al requerimiento de disco
-                    A_disk[0, idx] = self.vms[i].flavor.disk * usage_factor
+                    A_disk[0, idx] = self.vms[i].flavor.disk
                 
-                # Agregar variable y_j con coeficiente negativo del límite
-                # Usar solo el 80% del disco disponible
-                idx_y = n_vms * n_servers + j
-                A_disk[0, idx_y] = -server_resources[j]["disk"] 
-                
-                # Restricción: Suma(disk_i * x_ij) - (DISK_j * 0.8) * y_j <= 0
-                constraint_disk = LinearConstraint(A_disk, -np.inf, 0)
+                # La suma ponderada de disco no debe exceder la capacidad del servidor
+                constraint_disk = LinearConstraint(A_disk, -np.inf, self.servers[j].available_disk)
                 all_constraints.append(constraint_disk)
             
-            Logger.section(f"Resolviendo el modelo MILP con SciPy - Minimizando número de servidores (Perfil: {user_profile})")
-        
+            Logger.section("Resolviendo el modelo MILP con SciPy")
             
             # Resolver el problema usando milp de scipy.optimize
             result = milp(
@@ -815,8 +748,9 @@ class VMPlacementSolver:
                 # Redondear para asegurar valores binarios exactos (por si acaso)
                 x_solution = np.round(result.x).astype(int)
                 
-                # Extraer las asignaciones
+                # Extraer las asignaciones y registrar VMs no asignadas
                 assignments = {}
+                unassigned_vms = []
                 
                 for i in range(n_vms):
                     assigned = False
@@ -829,88 +763,88 @@ class VMPlacementSolver:
                             break
                     
                     if not assigned:
+                        unassigned_vms.append(self.vms[i])
                         Logger.warning(f"VM {self.vms[i].name} (ID: {self.vms[i].id}) no fue asignada a ningún servidor")
                 
-                # Contar servidores usados
-                servers_used = set(assignments.values())
-                server_count = len(servers_used)
+                # El valor objetivo es negativo de la función objetivo (porque minimizamos -utilidad)
+                objective_value = -result.fun
+                Logger.success(f"Solución encontrada con valor objetivo: {objective_value:.2f}")
                 
-                # El valor objetivo es el número de servidores usados
-                objective_value = result.fun
-                Logger.success(f"Solución encontrada: se utilizaron {server_count} servidores (valor objetivo: {objective_value:.2f})")
+                # Estadísticas de la solución
+                vm_count = len(assignments)
+                server_count = len(set(assignments.values()))
+                Logger.info(f"Se asignaron {vm_count} de {n_vms} VMs a {server_count} servidores")
                 
-                # Verificar que todas las VMs fueron asignadas
-                if len(assignments) < n_vms:
-                    unassigned_vms = [vm for vm in self.vms if vm.id not in assignments.keys()]
+                # Analizar por qué las VMs no pudieron ser asignadas
+                if unassigned_vms:
+                    Logger.section("Análisis de VMs no asignadas")
+                    
+                    # Lista para almacenar detalles de por qué cada VM no fue asignada
                     unassigned_details = []
                     
                     for vm in unassigned_vms:
-                        # Analizar razones específicas para cada VM no asignada
-                        vm_vcpus = vm.flavor.vcpus
-                        vm_ram = vm.flavor.ram
-                        vm_disk = vm.flavor.disk
+                        Logger.warning(f"Analizando por qué VM {vm.name} (ID: {vm.id}) no pudo ser asignada:")
                         
-                        # Verificar si algún servidor tiene recursos suficientes individualmente
-                        can_fit_somewhere = False
-                        resource_limitations = []
+                        # Verificar si puede caber en algún servidor con respecto a cada recurso
+                        can_fit_by_vcpu = False
+                        can_fit_by_ram = False
+                        can_fit_by_disk = False
                         
                         for server in self.servers:
-                            # Verificar cada recurso por separado
-                            cpu_ok = server.available_vcpus >= vm_vcpus
-                            ram_ok = server.available_ram >= vm_ram
-                            disk_ok = server.available_disk >= vm_disk
-                            
-                            if cpu_ok and ram_ok and disk_ok:
-                                can_fit_somewhere = True
-                                break
-                            else:
-                                # Registrar qué recursos específicos faltan
-                                if not cpu_ok:
-                                    resource_limitations.append(f"vCPUs (requiere {vm_vcpus}, disponible máximo {server.available_vcpus})")
-                                if not ram_ok:
-                                    resource_limitations.append(f"RAM (requiere {vm_ram} MB, disponible máximo {server.available_ram} MB)")
-                                if not disk_ok:
-                                    resource_limitations.append(f"Disco (requiere {vm_disk:.1f} GB, disponible máximo {server.available_disk:.1f} GB)")
+                            if vm.flavor.vcpus <= server.available_vcpus:
+                                can_fit_by_vcpu = True
+                            if vm.flavor.ram <= server.available_ram:
+                                can_fit_by_ram = True
+                            if vm.flavor.disk <= server.available_disk:
+                                can_fit_by_disk = True
                         
-                        # Determinar la razón principal de la no asignación
-                        if can_fit_somewhere:
-                            reason = "No se pudo asignar la VM al minimizar el número total de servidores usados. Existe capacidad individual pero no se pudo optimizar la distribución."
-                        else:
-                            unique_limitations = list(set(resource_limitations))  # Eliminar duplicados
-                            reason = f"Ningún servidor tiene recursos suficientes. Limitaciones: {', '.join(unique_limitations[:3])}"
-                            if len(unique_limitations) > 3:
-                                reason += " (entre otras)"
-                        
+                        # Crear los detalles de por qué no fue asignada esta VM
                         vm_reason = {
                             "vm_id": vm.id,
                             "vm_name": vm.name,
-                            "flavor": {
-                                "name": vm.flavor.name,
-                                "vcpus": vm_vcpus,
-                                "ram": vm_ram,
-                                "disk": vm_disk
-                            },
-                            "reasons": [reason]
+                            "reasons": []
                         }
+                        
+                        if not can_fit_by_vcpu:
+                            reason = f"VM requiere {vm.flavor.vcpus} vCPUs pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
+                        if not can_fit_by_ram:
+                            reason = f"VM requiere {vm.flavor.ram} MB de RAM pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
+                        if not can_fit_by_disk:
+                            reason = f"VM requiere {vm.flavor.disk:.1f} GB de disco pero ningún servidor tiene suficiente capacidad disponible"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
+                        
+                        # Si la VM puede caber en servidores individuales pero no fue asignada
+                        if can_fit_by_vcpu and can_fit_by_ram and can_fit_by_disk:
+                            reason = "La VM podría caber individualmente, pero la solución óptima encontrada por el algoritmo no la incluye debido a restricciones globales y/o para maximizar la utilidad total"
+                            Logger.error(f"- {reason}")
+                            vm_reason["reasons"].append(reason)
+                        
                         unassigned_details.append(vm_reason)
-                        Logger.warning(f"VM {vm.name} (ID: {vm.id}) no asignada: {reason}")
                     
-                    message = f"No se pudieron asignar todas las VMs. {len(unassigned_vms)} de {n_vms} VMs no fueron asignadas."
+                    # Generar mensaje de error apropiado
+                    message = f"No se pudieron asignar todas las VMs. {len(unassigned_vms)} de {n_vms} VMs no fueron asignadas debido a restricciones de capacidad o para mantener la solución óptima."
+                    
+                    # CAMBIO PRINCIPAL: Ahora consideramos que cualquier VM sin asignar es un fallo
+                    # Devolvemos un resultado fallido pero con los datos de asignaciones parciales
                     Logger.failed(message)
-                    
                     return PlacementResult(
-                        success=False,
+                        success=False,  # Ahora siempre es False si hay VMs sin asignar
                         assignments=assignments,
                         message=message,
                         objective_value=objective_value,
-                        unassigned_details=unassigned_details
+                        unassigned_details=unassigned_details  # Agregar detalles de VMs no asignadas
                     )
                 
                 # Si todas las VMs fueron asignadas
                 return PlacementResult(
                     success=True,
                     assignments=assignments,
-                    message=f"Solución óptima encontrada. Todas las VMs ({n_vms}) asignadas utilizando {server_count} servidores.",
+                    message=f"Solución óptima encontrada. Todas las VMs ({vm_count}) asignadas a {server_count} servidores.",
                     objective_value=objective_value
                 )
             else:
@@ -919,8 +853,8 @@ class VMPlacementSolver:
             
         except Exception as e:
             Logger.error(f"Error al resolver el problema: {str(e)}")
-            Logger.debug(f"Traceback: {traceback.format_exc()}")
             return PlacementResult(success=False, message=f"Error: {str(e)}")
+
 
     def visualize_placement(self, result: PlacementResult):
         """
@@ -934,10 +868,6 @@ class VMPlacementSolver:
             return
         
         Logger.section("Visualización del Placement")
-        
-        # Obtener el factor de uso basado en el perfil del usuario
-        usage_factor = USER_PROFILE_USAGE_FACTORS.get(result.user_profile, USER_PROFILE_USAGE_FACTORS["default"])
-        Logger.info(f"Aplicando factor de uso para perfil '{result.user_profile}': {usage_factor}")
         
         # Crear un mapa de servidores a VMs asignadas
         server_to_vms = {}
@@ -967,10 +897,9 @@ class VMPlacementSolver:
                 if not vm:
                     continue
                     
-                # Aplicar el factor de uso según el perfil
-                vcpus_used += vm.flavor.vcpus * usage_factor
-                ram_used += vm.flavor.ram * usage_factor
-                disk_used += vm.flavor.disk * usage_factor
+                vcpus_used += vm.flavor.vcpus
+                ram_used += vm.flavor.ram
+                disk_used += vm.flavor.disk
                 
                 # Guardar información detallada de la VM para la gráfica adicional
                 vm_details.append({
@@ -978,9 +907,9 @@ class VMPlacementSolver:
                     "vm_name": vm.name,
                     "server_id": server_id,
                     "server_name": server.name,
-                    "vcpus": vm.flavor.vcpus * usage_factor,
-                    "ram": vm.flavor.ram * usage_factor,
-                    "disk": vm.flavor.disk * usage_factor
+                    "vcpus": vm.flavor.vcpus,
+                    "ram": vm.flavor.ram,
+                    "disk": vm.flavor.disk
                 })
             
             server_usage[server_id] = {
@@ -1382,11 +1311,12 @@ class DataManager:
                     Logger.warning(f"VM {vm_data.get('id', 'desconocida')} no tiene flavor válido, asignando default")
                     flavor = Flavor(id=-1, name="default", vcpus=1, ram=1024, disk=10.0)
                 
-                # Crear la VM
+                # Crear la VM con su utilidad (si existe)
                 vm = VirtualMachine(
                     id=vm_data['id'],
                     name=vm_data['name'],
-                    flavor=flavor
+                    flavor=flavor,
+                    utility=vm_data.get('utility', 0.0)
                 )
                 vms.append(vm)
             
@@ -1588,6 +1518,7 @@ class DataManager:
         
         return json.dumps(test_data, indent=2)
 
+
 # ===================== ENDPOINTS DE LA API =====================
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -1607,9 +1538,6 @@ def solve_placement():
     
     Cuerpo del request:
     {
-        "slice_id": 123,
-        "slice_name": "slice-123",
-        "user_profile": "investigador",  // alumno, jp, maestro, investigador
         "virtual_machines": [
             {
                 "id": 1,
@@ -1640,24 +1568,14 @@ def solve_placement():
                 "details": "No se proporcionaron datos JSON en el cuerpo de la solicitud"
             }), 400
         
-        # Validar que existan los campos requeridos
-        required_fields = ['virtual_machines']
-        missing_fields = [field for field in required_fields if field not in request_data]
-        
-        if missing_fields:
-            Logger.error(f"Faltan campos requeridos en el request: {', '.join(missing_fields)}")
+        # Validar que exista el campo 'virtual_machines'
+        if 'virtual_machines' not in request_data:
+            Logger.error("No se proporcionó el campo 'virtual_machines' en el request")
             return jsonify({
                 "status": "error",
                 "message": "Datos de entrada inválidos",
-                "details": f"Se requieren los campos: {', '.join(missing_fields)}"
+                "details": "Se requiere el campo 'virtual_machines' en el JSON"
             }), 400
-        
-        # Extraer información del slice (opcional)
-        slice_id = request_data.get('slice_id')
-        slice_name = request_data.get('slice_name', '')
-        user_profile = request_data.get('user_profile', '')
-        
-        Logger.info(f"Procesando solicitud de placement para slice_id: {slice_id}, slice_name: {slice_name}, user_profile: {user_profile}")
         
         # Obtener los servidores físicos desde la base de datos
         _, servers = DataManager.load_from_database()
@@ -1711,12 +1629,7 @@ def solve_placement():
             
             # Resolver el problema
             solver = VMPlacementSolver(vms, servers)
-            result = solver.solve(user_profile=user_profile)
-            
-            # Agregar información del slice al resultado
-            result.slice_id = slice_id
-            result.slice_name = slice_name
-            result.user_profile = user_profile
+            result = solver.solve()
             
             # Generar respuesta según el resultado
             if result.success:
@@ -1733,7 +1646,7 @@ def solve_placement():
                 
                 return jsonify({
                     "status": "success",
-                    "message": f"Se realizó el placement de {len(result.assignments)} VMs para el slice {slice_name}",
+                    "message": f"Se realizó el placement de {len(result.assignments)} VMs",
                     "content": result_dict
                 }), 200
             else:
@@ -1776,42 +1689,24 @@ def solve_placement():
 @app.route('/test-data', methods=['GET'])
 def get_test_data():
     """
-    Endpoint para obtener datos de prueba completos que pueden usarse directamente con el endpoint de placement
+    Endpoint para obtener datos de prueba que pueden usarse con el endpoint de placement
     """
     try:
         # Generar datos de prueba con flavors de la BD
-        num_vms = np.random.randint(1, 8)
+        num_vms = np.random.randint(1,8)
         test_data_json = DataManager.generate_test_data(num_vms=num_vms, num_servers=0, seed=None)
         test_data = json.loads(test_data_json)
         
-        # Generar un slice_id aleatorio
-        slice_id = np.random.randint(100, 999)
-        
-        # Generar un nombre de slice
-        slice_name = f"slice-test-{slice_id}"
-        
-        # Seleccionar un perfil de usuario aleatorio
-        profiles = list(USER_PROFILE_USAGE_FACTORS.keys())
-        profiles.remove("default")
-        user_profile = random.choice(profiles)
-        
-        # Crear el cuerpo completo del request
         response_data = {
-            "slice_id": slice_id,
-            "slice_name": slice_name,
-            "user_profile": user_profile,
             "virtual_machines": test_data["virtual_machines"]
         }
         
         Logger.success(f"Datos de prueba para VM Placement generados con éxito!")
-        Logger.info(f"Generado slice_id: {slice_id}, slice_name: {slice_name}, user_profile: {user_profile}")
-        Logger.info(f"Total VMs generadas: {len(test_data['virtual_machines'])}")
 
         return jsonify({
             "status": "success",
             "message": "Datos de prueba generados correctamente",
-            "content": response_data,
-            "instructions": "Puede utilizar estos datos directamente con el endpoint /placement"
+            "content": response_data
         }), 200
         
     except Exception as e:
@@ -1821,7 +1716,7 @@ def get_test_data():
             "message": "Error al generar datos de prueba",
             "details": str(e)
         }), 500
-    
+
 # ===================== SERVER =====================
 if __name__ == '__main__':
     try:
@@ -1844,12 +1739,7 @@ if __name__ == '__main__':
         try:
             example_data = DataManager.generate_test_data(num_vms=5, num_servers=0, seed=69)
             example = json.loads(example_data)
-            vm_data = {
-                "slice_id": 123,
-                "slice_name": "slice-test",
-                "user_profile": "investigador",
-                "virtual_machines": example["virtual_machines"]
-            }
+            vm_data = {"virtual_machines": example["virtual_machines"]}
             
             Logger.info("Ejemplo de payload para el endpoint /placement:")
             Logger.info(json.dumps(vm_data, indent=2))

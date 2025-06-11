@@ -2,6 +2,7 @@
 # | ARCHIVO: slice_placement.py
 # ==============================================================================
 # | DESCRIPCIÓN:
+
 # | Módulo API REST que implementa un algoritmo de asignación de conjuntos de 
 # | máquinas virtuales (slices) a servidores físicos, optimizando la localidad
 # | y distribución de recursos. Implementa un enfoque de cluster-first para
