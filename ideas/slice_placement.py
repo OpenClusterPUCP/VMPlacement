@@ -606,7 +606,7 @@ class PhysicalServer:
         # Función no lineal para estimar tiempo de espera según congestión
         # (crece exponencialmente cuando la congestión es alta)
         vcpu_congestion = congestion["vcpu"]
-        
+        """
         if vcpu_congestion <= 0.7:
             # Crecimiento lineal hasta 70% de congestión
             queue_time = vcpu_congestion * 0.4  # máximo 0.28 cuando 70%
@@ -615,6 +615,12 @@ class PhysicalServer:
             # Tiempo base + incremento exponencial
             base = 0.28  # valor a 70%
             queue_time = base + ((vcpu_congestion - 0.7) / 0.3) ** 2 * 0.72  # máximo 1.0
+        """
+            
+        # Función sigmoide ajustada
+        a = 12 # pendiente
+        b = 0.7 # punto de inflexión (congestión crítica)
+        queue_time = 1/(1+ math.exp(-a*(vcpu_congestion-b)))
         
         return queue_time
     
