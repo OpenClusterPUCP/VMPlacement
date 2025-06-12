@@ -135,6 +135,34 @@ La solución utiliza el solver MILP de SciPy para encontrar la asignación ópti
 
 ---
 
+## Definición de Función Q (Tiempo relativo de espera en cola para el slice)
+
+La función $$( Q_i $$) representa el tiempo relativo de espera en cola para un slice, basado en la congestión del servidor. Se define mediante una función sigmoide suave:
+
+$$
+Q_i = \frac{1}{1 + e^{-a(c_{vcpu} - b)}}
+$$
+
+Donde:
+
+- $$( c_{vcpu} $$): congestión del servidor (valor entre 0 y 1)
+- $$( a = 12 $$): pendiente de la curva
+- $$( b = 0.7 $$): punto de inflexión (~70% de congestión)
+
+Esta fórmula permite una transición progresiva y continua en la estimación del tiempo de espera, evitando saltos abruptos cuando la congestión aumenta.
+
+🔧 Con **a = 12**, se logra:
+
+- Q ≈ 0.05 cuando congestión = 0.4
+- Q ≈ 0.5 cuando congestión = 0.7
+- Q ≈ 0.95 cuando congestión = 1.0
+
+Gráfico:
+
+![Captura de pantalla 2025-06-12 175449](https://github.com/user-attachments/assets/854a939d-6a03-4032-a36a-865b24a02465)
+
+
+
 ## ⚙️ Consideraciones adicionales
 
 - 🔄 Los recursos en tiempo real se obtienen mediante una API externa (simulada en esta versión)
