@@ -2,7 +2,6 @@
 # | ARCHIVO: slice_placement.py
 # ==============================================================================
 # | DESCRIPCIÓN:
-
 # | Módulo API REST que implementa un algoritmo de asignación de conjuntos de 
 # | máquinas virtuales (slices) a servidores físicos, optimizando la localidad
 # | y distribución de recursos. Implementa un enfoque de cluster-first para
@@ -429,17 +428,27 @@ class Slice:
         usage_factors = UserProfile.get_resource_usage_factors(self.user_profile)
         variability = UserProfile.get_workload_variability(self.user_profile)
         
+        #Cálculo inicial (puede exceder nominal)
+        raw_vcpu = nominal["vcpu"] * usage_factors["vcpu"] * variability
+        raw_ram = nominal["ram"] * usage_factors["ram"] * variability
+        raw_disk = nominal["disk"] * usage_factors["disk"] * variability
+        
+        #No se puede exceder del límite nominal. Lo máximo es lo nominal (Corrección del profe)
+        vcpu_check = min(raw_vcpu, nominal["vcpu"])
+        ram_check = min(raw_ram, nominal["ram"])
+        disk_check = min(raw_disk, nominal["disk"])
+        
         return {
-            "vcpu": nominal["vcpu"] * usage_factors["vcpu"] * variability,
-            "ram": nominal["ram"] * usage_factors["ram"] * variability,
-            "disk": nominal["disk"] * usage_factors["disk"] * variability
+            "vcpu": vcpu_check,
+            "ram": ram_check,
+            "disk": disk_check
         }
     
     def get_resource_weights(self) -> Dict[str, float]:
         """Obtiene pesos relativos para cada tipo de recurso según el workload"""
         return WorkloadType.get_resource_weights(self.workload_type)
     
-    def calculate_utility(self) -> float:
+    def calculate_utility(self) -> float: #NO SE USA
         """
         Calcula la utilidad del slice completo basada en sus recursos y perfil
         """
