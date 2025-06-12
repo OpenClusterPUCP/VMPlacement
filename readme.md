@@ -165,7 +165,7 @@ Esta curva da una transición suave entre baja congestión (espera casi nula) y 
 
 Comportamiento Realista
 
-| Congestión $\c_{vcpu}$ | Interpetación de $Q_i$                  |
+| Congestión $c_{vcpu}$ | Interpetación de $Q_i$                  |
 | ------------------- | --------------------------------------- |
 | Cerca de 0          | Tiempo de espera ≈ 0 (servidor libre)   |
 | Alrededor de 0.7    | Tiempo de espera ≈ 0.5 (zona crítica)   |
