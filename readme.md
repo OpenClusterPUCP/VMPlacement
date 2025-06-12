@@ -161,7 +161,15 @@ Gráfico:
 
 ![Captura de pantalla 2025-06-12 175449](https://github.com/user-attachments/assets/854a939d-6a03-4032-a36a-865b24a02465)
 
+Esta curva da una transición suave entre baja congestión (espera casi nula) y alta cogestión (espera significativa)
 
+Comportamiento Realista
+
+| Congestión $\c_{vcpu}$ | Interpetación de $Q_i$                  |
+| ------------------- | --------------------------------------- |
+| Cerca de 0          | Tiempo de espera ≈ 0 (servidor libre)   |
+| Alrededor de 0.7    | Tiempo de espera ≈ 0.5 (zona crítica)   |
+| Cerca de 1          | Tiempo de espera ≈ 1 (saturación total) |
 
 ## ⚙️ Consideraciones adicionales
 
