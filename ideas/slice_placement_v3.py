@@ -219,69 +219,15 @@ class VirtualMachine:
     name: str
     flavor: Flavor
     utility: float = 0.0
+    mu_vcpu_used: float = 0.0
+    mu_ram_used: float = 0.0
+    mu_disk_used: float = 0.0
+    desv_vcpu_used: float = 0.0
+    desv_ram_used: float = 0.0
+    desv_disk_used: float = 0.0
     
     def __str__(self):
         return f"VM {self.id}: {self.name} - {self.flavor.name} (Utilidad: {self.utility:.2f})"
-    
-    def validacion_seguridad_cpu_vm(self, servidor, usado: Dict[str, float], profile: str, k: float = 2.0) -> bool:
-        """
-        Verifica que añadir esta VM al servidor no exceda el 95% de la capacidad CPU física.
-        
-        Parámetros:
-            vm: objeto VirtualMachine
-            servidor: {'vcpu': total_vcpu, ...}
-            usado: {'vcpu': used_vcpu, ...}
-            profile: perfil de usuario ('alumno', 'investigador', etc.)
-            k: factor estadístico (default 2.0)
-
-        Retorna:
-            True si añadir la VM no sobrepasa el 95% de la capacidad CPU
-        """
-        # Estadísticas de uso de esta VM
-        mu, sigma = self.calcular_estadisticas_de_uso(profile)["cpu"]
-        capacidad_efectiva_vm = mu + k * sigma
-
-        # Estado actual del servidor
-        total_cpu_fisica = servidor.total_vcpus
-        usado_cpu = usado["vcpu"]
-        maximo_seguro = total_cpu_fisica * 0.95
-        demanda_total = usado_cpu + capacidad_efectiva_vm
-
-        Logger.debug(f"[VALIDACIÓN CPU] VM={self.name} | μ+ksigma={capacidad_efectiva_vm:.2f} | usado={usado_cpu:.2f} | total={total_cpu_fisica} | max seguro={maximo_seguro:.2f}")
-
-        return demanda_total <= maximo_seguro
-
-    
-    def cabe_en_servidor_vm(self, servidor, usado: Dict[str, float], user_profile: str, k: float = 2.0) -> bool:
-        """
-        Verifica si esta VM puede ser asignada al servidor dado,
-        considerando sobreaprovisionamiento y uso actual.
-
-        Retorna True si cabe, False si no.
-        """
-        lambdas = UserProfile.get_overprovisioning_limits(user_profile)
-
-        requerimientos = {
-            "vcpu": self.flavor['vcpus'],
-            "ram": self.flavor['ram'],
-            "disk": self.flavor['disk']
-        }
-        
-        capacidades = {
-            "vcpu": servidor.total_vcpus,
-            "ram": servidor.total_ram,
-            "disk": servidor.total_disk
-        }
-        
-
-        for recurso in ["vcpu", "ram", "disk"]:
-            limite = capacidades[recurso] * lambdas[recurso]
-            demanda_total = usado[recurso] + requerimientos[recurso]
-            if demanda_total > limite:
-                return False  # no cabe en ese recurso
-
-        return True
-
     
     def calcular_estadisticas_de_uso(self, profile: str) -> Dict[str, Tuple[float, float]]: # 3.4. Cálculo de Uso Promedio y Variabilidad de VM
         """
@@ -311,6 +257,7 @@ class VirtualMachine:
         sigma_disk = mu_disk * (beta - 1)
 
         return {
+            "vm_name": self.name,
             "cpu": (round(mu_cpu, 4), round(sigma_cpu, 4)), #EVALUAR REDONDEO
             "ram": (round(mu_ram, 4), round(sigma_ram, 4)),
             "disk": (round(mu_disk, 4), round(sigma_disk, 4))
@@ -331,14 +278,6 @@ class PhysicalServer:
     used_ram: int = 0
     used_disk: float = 0.0
     
-    # Factores de sobreaprovisionamiento predeterminados
-    vcpu_overprovisioning_factor: float = 1.7  # Sobreaprovisionamiento de CPU
-    ram_overprovisioning_factor: float = 1.1   # Sobreaprovisionamiento de RAM
-    disk_overprovisioning_factor: float = 1.7  # Sobreaprovisionamiento de disco
-    
-    # Factor de rendimiento relativo del servidor
-    performance_factor: float = 1.0
-    
     @property
     def available_vcpus(self) -> int:
         """vCPUs disponibles sin sobreaprovisionamiento"""
@@ -354,29 +293,6 @@ class PhysicalServer:
         """Disco disponible sin sobreaprovisionamiento (GB)"""
         return self.total_disk - self.used_disk
     
-    @property
-    def max_vcpus_with_overprovisioning(self) -> float:
-        """Capacidad máxima de vCPUs con sobreaprovisionamiento"""
-        return self.total_vcpus * self.vcpu_overprovisioning_factor
-    
-    @property
-    def max_ram_with_overprovisioning(self) -> float:
-        """Capacidad máxima de RAM con sobreaprovisionamiento"""
-        return self.total_ram * self.ram_overprovisioning_factor
-    
-    @property
-    def max_disk_with_overprovisioning(self) -> float:
-        """Capacidad máxima de disco con sobreaprovisionamiento"""
-        return self.total_disk * self.disk_overprovisioning_factor
-
-    def get_usos_actuales(self) -> Dict[str, float]:
-        return {
-            "vcpu": self.used_vcpus,
-            "ram": self.used_ram,
-            "disk": self.used_disk
-        }
-    
-
 class DatabaseManager:
     """
     Gestiona las conexiones y consultas a la base de datos MySQL
@@ -442,35 +358,6 @@ class DatabaseManager:
             return flavors
         except Exception as e:
             Logger.error(f"Error al obtener flavors activos: {str(e)}")
-            return []
-    
-    @classmethod
-    def get_physical_servers(cls):
-        """
-        Obtiene todos los servidores físicos disponibles
-        """
-        query = """
-            SELECT 
-                id, 
-                name,
-                ip, 
-                total_vcpu as total_vcpus, 
-                total_ram, 
-                total_disk,
-                used_vcpu as used_vcpus,
-                used_ram,
-                used_disk
-            FROM physical_server
-            WHERE server_type = 'worker' AND status = 'active'
-            ORDER BY id
-        """
-        try:
-            servers = cls.execute_query(query)
-            import random #RANDOM
-            Logger.info(f"Se obtuvieron {len(servers)} servidores físicos desde la BD")
-            return servers
-        except Exception as e:
-            Logger.error(f"Error al obtener servidores físicos: {str(e)}")
             return []
     
     @classmethod
@@ -543,6 +430,79 @@ class DatabaseManager:
             Logger.error(f"Error al obtener servidores físicos: {str(e)}")
             return []
     
+    @classmethod
+    def calcular_capacidad_asignada_con_modelo_compuesto(cls, servidor_id: int) -> Dict[str, float]:
+        """
+        Calcula la capacidad asignada (μ y σ) por recurso en un servidor físico.
+        Aplica:
+        - Enfoque correlacionado dentro de cada slice (μ_slice = suma(μ_vm), σ_slice = suma(σ_vm))
+        - Enfoque independiente entre slices (σ_total = sqrt(suma(σ_slice^2)), μ_total = suma(μ_slice))
+        """
+        query = """
+            SELECT slice,
+                SUM(COALESCE(mu_vcpu_used, 0)) AS mu_cpu_slice,
+                SUM(COALESCE(mu_ram_used, 0)) AS mu_ram_slice,
+                SUM(COALESCE(mu_disk_used, 0)) AS mu_disk_slice,
+                SUM(COALESCE(desv_vcpu_used, 0)) AS sigma_cpu_slice,
+                SUM(COALESCE(desv_ram_used, 0)) AS sigma_ram_slice,
+                SUM(COALESCE(desv_disk_used, 0)) AS sigma_disk_slice
+            FROM virtual_machine
+            WHERE physical_server = %s
+            AND status IN ('running', 'preparing')
+            GROUP BY slice;
+        """
+
+        try:
+            resultados = cls.execute_query(query, (servidor_id,))
+            #Si no hay resultados significa que el server no tiene instancia alguna
+            if not resultados:
+                return {
+                    "mu_cpu": 0.0, "sigma_cpu": 0.0,
+                    "mu_ram": 0.0, "sigma_ram": 0.0,
+                    "mu_disk": 0.0, "sigma_disk": 0.0
+                }
+
+            mu_total = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
+            sigma_total_cuad = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
+
+            for row in resultados:
+                # μ_total ← suma directa
+                mu_total["cpu"] += row["mu_cpu_slice"] or 0
+                mu_total["ram"] += row["mu_ram_slice"] or 0
+                mu_total["disk"] += row["mu_disk_slice"] or 0
+
+                # σ_total ← sqrt(suma de σ_slice²)
+                sigma_total_cuad["cpu"] += (row["sigma_cpu_slice"] or 0) ** 2
+                sigma_total_cuad["ram"] += (row["sigma_ram_slice"] or 0) ** 2
+                sigma_total_cuad["disk"] += (row["sigma_disk_slice"] or 0) ** 2
+
+            # σ final: raíz cuadrada de suma de cuadrados
+            sigma_total = {
+                "cpu": math.sqrt(sigma_total_cuad["cpu"]),
+                "ram": math.sqrt(sigma_total_cuad["ram"]),
+                "disk": math.sqrt(sigma_total_cuad["disk"])
+            }
+
+            return {
+                "mu_cpu": round(mu_total["cpu"], 4),
+                "sigma_cpu": round(sigma_total["cpu"], 4),
+                "mu_ram": round(mu_total["ram"], 4),
+                "sigma_ram": round(sigma_total["ram"], 4),
+                "mu_disk": round(mu_total["disk"], 4),
+                "sigma_disk": round(sigma_total["disk"], 4)
+            }
+
+        except Exception as e:
+            Logger.error(f"Error al calcular capacidad asignada compuesta: {str(e)}")
+            return {
+                "mu_cpu": 0.0, "sigma_cpu": 0.0,
+                "mu_ram": 0.0, "sigma_ram": 0.0,
+                "mu_disk": 0.0, "sigma_disk": 0.0
+            }
+
+
+    
+    
 
 @dataclass
 class Slice:
@@ -553,32 +513,6 @@ class Slice:
     user_profile: str = UserProfile.ALUMNO
     workload_type: str = WorkloadType.GENERAL
     
-    def calcular_capacidad_efectica_slice(self, k: float = 2.0) -> Dict[str, float]: # 3.5.1 Enfoque Independiente Implementado
-        """
-        Calcula la capacidad esperada del slice usando enfoque independiente
-        (media + k * desviación estándar) para CPU, RAM y Disco.
-        Usa el Teorema del Límite Central.
-        """
-        suma_mu = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
-        suma_sigma2 = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
-
-        for vm in self.vms:
-            stats = vm.calcular_estadisticas_de_uso(self.user_profile)
-            for recurso in ["cpu", "ram", "disk"]:
-                mu, sigma = stats[recurso]
-                suma_mu[recurso] += mu
-                suma_sigma2[recurso] += sigma**2
-
-        # Calcular capacidad efectiva = μ + σ
-        resultados = {}
-        for recurso in ["cpu", "ram", "disk"]:
-            mu_total = suma_mu[recurso]
-            sigma_total = math.sqrt(suma_sigma2[recurso])
-            capacidad_efectiva = mu_total + sigma_total
-            resultados[recurso] = round(capacidad_efectiva, 2) # EVALUAR REDONDEO
-
-        return resultados #Array de capacidad efectiva por recurso
-    
     def calcular_demanda_efectica_slice_correlacionado(self) -> Dict[str, float]: # 3.5.1 Enfoque Correlacionado
         """
         Calcula la demanda esperada del slice usando enfoque correlacionado de VMs
@@ -587,6 +521,7 @@ class Slice:
         """
         suma_mu = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
         suma_sigma = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
+        lista_stats_vms = [] #Lista para capturar los stats de cada VM (media de uso y desv estándar)
 
         for vm in self.vms:
             stats = vm.calcular_estadisticas_de_uso(self.user_profile)
@@ -594,6 +529,7 @@ class Slice:
                 mu, sigma = stats[recurso]
                 suma_mu[recurso] += mu
                 suma_sigma[recurso] += sigma
+                lista_stats_vms.append(stats)
 
         # Calcular demanda efectiva = μ + σ
         resultados = {}
@@ -603,70 +539,39 @@ class Slice:
             demanda_efectiva = mu_total + sigma_total
             resultados[recurso] = round(demanda_efectiva, 4) # EVALUAR REDONDEO
 
-        return resultados #Array de capacidad efectiva por recurso
+        return resultados, lista_stats_vms #Array de capacidad efectiva por recurso
     
     from typing import Tuple, Optional
-
-    def cabe_en_servidor(self, servidor: Dict[str, float], usado: Dict[str, float], alfa: float = 0.5) -> Tuple[bool, Optional[str], Dict[str, float]]: #5.2
-        """
-        Verifica si este slice puede colocarse en un servidor físico dado,
-        usando el modelo estadístico independiente con sobreaprovisionamiento SLA.
-
-        Parámetros:
-            - servidor: {'vcpu': ..., 'ram': ..., 'disk': ...}  ← total
-            - usado:    {'vcpu': ..., 'ram': ..., 'disk': ...}  ← usado
-            - k: factor estadístico (confianza)
-
-        Retorna:
-            - bool: si el slice cabe
-            - str: recurso que falla (si aplica)
-            - dict: márgenes disponibles por recurso
-        """
-        
-        # 1. Obtener capacidad efectiva (μ + σ)
-        #capacidad_efectiva = self.calcular_capacidad_efectica_slice(k)
-        demanda_efectiva = self.calcular_demanda_efectica_slice_correlacionado()
-        Logger.info(f"Demanda efectiva del slice: {demanda_efectiva}")
-        # 2. Obtener límites de sobreaprovisionamiento por perfil
-        lambdas = UserProfile.get_overprovisioning_limits(self.user_profile)
-        Logger.info(f"lambdas: {lambdas}")
-        # 3. Evaluar para cada recurso
-        margenes = {}
-        for r in ["vcpu", "ram", "disk"]:
-            # Mapeo: en UserProfile los keys son cpu/ram/disk, pero aquí usamos vcpu/ram/disk
-            capacidad_total = servidor[r] #Capacidad total del recurso de base de datos del server
-            capacidad_usada = usado[r] #Capacidad usada, calculado por Prometheus
-            #capacidad_asignada = server
-            limite = capacidad_total * lambdas[r]
-            if r == "vcpu":
-                demanda = capacidad_usada + demanda_efectiva["cpu"]
-            else:
-                demanda = capacidad_usada + demanda_efectiva[r]
-                
-            margen = round(limite - demanda, 2)
-            if r == "vcpu":
-                margenes["cpu"] = margen
-            else:
-                margenes[r] = margen
-            
-            if demanda > limite:
-                return False, r, margenes # No cabe
-            
-        return True, None, margenes # Cabe
     
-    def capacidad_usada_function(self, recurso, servidor: Dict[str, float]):
-        capacidad_usada = 0
+    def capacidades_function(self, recurso, servidor: PhysicalServer):
+        """
+            Función que calcula las capacidades de los servidores
+        """
+        #FALTA CORREGIR LA CAPACIDAD ASIGNADA
+        capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(servidor.id)
         if(recurso == "vcpu"):
-            capacidad_usada = servidor.used_vcpu
+            capacidad_usada = servidor.used_vcpus
+            capacidad_total = servidor.total_vcpus
+            capacidad_asignada = capacidades_asignadas["mu_cpu"] + capacidades_asignadas["sigma_cpu"]
         elif(recurso=="ram"):
-            capacidad_usada = servidor.used_disk
-        else:
             capacidad_usada = servidor.used_ram
-        
-        return capacidad_usada
+            capacidad_total = servidor.total_ram
+            capacidad_asignada = capacidades_asignadas["mu_ram"] + capacidades_asignadas["sigma_ram"]
+        else:
+            capacidad_usada = servidor.used_disk
+            capacidad_total = servidor.total_disk
+            capacidad_asignada = capacidades_asignadas["mu_disk"] + capacidades_asignadas["sigma_disk"]
+        return capacidad_total, capacidad_usada, capacidad_asignada
+    
+    def obtener_demanda_slice(self, r: str, demanda_efectiva: Dict[str, float]):
+        if r == "vcpu":
+            demanda_slice = demanda_efectiva["cpu"] #demanda en cpu del slice
+        else:
+            demanda_slice = demanda_efectiva[r] #demanda en ram o disk del slice
+        return demanda_slice
         
     
-    def cabe_en_servidor_nuevo(self, servidor: Dict[str, float], usado: Dict[str, float], alfa: float = 0.5) -> Tuple[bool, Optional[str], Dict[str, float]]: #5.2
+    def cabe_en_servidor(self, servidor: PhysicalServer, alfa: float = 0.5) -> Tuple[bool, Optional[str], Dict[str, float]]: #5.2
         """
         Verifica si este slice puede colocarse en un servidor físico dado,
         usando el modelo estadístico independiente con sobreaprovisionamiento SLA.
@@ -681,153 +586,93 @@ class Slice:
             - str: recurso que falla (si aplica)
             - dict: márgenes disponibles por recurso
         """
+        congestion_dicc = {"congestion_cpu": 0.0, "congestion_ram": 0.0, "congestion_disk": 0.0}
         
-        # 1. Obtener capacidad efectiva (μ + σ)
-        #capacidad_efectiva = self.calcular_capacidad_efectica_slice(k)
-        demanda_efectiva = self.calcular_demanda_efectica_slice_correlacionado()
+        # 1. Obtener demanda efectiva (μ + σ) y lista_stats_vms para guardar en db si se instancia el slice
+        demanda_efectiva, lista_stats_vms = self.calcular_demanda_efectica_slice_correlacionado()
         Logger.info(f"Demanda efectiva del slice: {demanda_efectiva}")
+        Logger.info(f"Lista stats: {lista_stats_vms}")
         # 2. Obtener límites de sobreaprovisionamiento por perfil
         lambdas = UserProfile.get_overprovisioning_limits(self.user_profile)
         Logger.info(f"lambdas: {lambdas}")
         # 3. Evaluar para cada recurso
         margenes = {}
         for r in ["vcpu", "ram", "disk"]:
-            # Mapeo: en UserProfile los keys son cpu/ram/disk, pero aquí usamos vcpu/ram/disk
-            capacidad_total = servidor[r] #Capacidad total del recurso de base de datos del server
-            capacidad_usada = usado[r] #Capacidad usada, calculado por Prometheus
-            capacidad_asignada = self.capacidad_usada_function(r, servidor) #Capacidad Asignada del server a otros slices. CORREGIR con modelo INDEPENDIENTE
+            #Capacidades calculadas del server
+            capacidad_total, capacidad_usada, capacidad_asignada = self.capacidades_function(r, servidor)
+            Logger.info(f"[{r}] Total: {capacidad_total}, Usada: {capacidad_usada}, Asignada: {capacidad_asignada}")
+            #Capacidad disponible del server
             capacidad_disponible_server = lambdas[r]*(capacidad_total-alfa*capacidad_asignada-(1-alfa)*capacidad_usada)
-            if r == "vcpu":
-                demanda = demanda_efectiva["cpu"] #demanda en cpu del slice
-            else:
-                demanda = demanda_efectiva[r] #demanda en ram o disk del slice
-                
-            margen = round(capacidad_disponible_server - demanda, 4) #margen entre demanda la capacidad disponible del server y la demanda del slice
+            #Demanda del slice en base al recurso
+            demanda_slice = self.obtener_demanda_slice(r, demanda_efectiva)
+            #margen del recurso analizado (cpu, ram, disk)
+            margen = round(capacidad_disponible_server - demanda_slice, 4) #margen entre demanda la capacidad disponible del server y la demanda del slice
             if r == "vcpu":
                 margenes["cpu"] = margen
             else:
                 margenes[r] = margen
+            #Verificamos restricción
+            if demanda_slice > capacidad_disponible_server:
+                return False, r, margenes, None # No cabe
             
-            if demanda > capacidad_disponible_server:
-                return False, r, margenes # No cabe
-        return True, None, margenes # Cabe
-    
-    def validacion_seguridad_cpu(self, servidor: Dict[str, float], usado: Dict[str, float], k: float = 2.0) -> bool: # OS, etc.
-        """
-        Verifica que el uso total estimado de CPU no exceda el 95% de la capacidad física total,
-        independientemente del sobreaprovisionamiento (seguridad del sistema).
-
-        Parámetros:
-            servidor: {'vcpu': total_vcpu, ...}
-            usado: {'vcpu': used_vcpu, ...}
-            k: factor estadístico de confianza (default 2.0 para 95%)
-
-        Retorna:
-            True si pasa la validación de seguridad, False si se excede el 95%
-        """
-        # 1. Calcular μ_s^cpu y σ_s^cpu
-        suma_mu = 0.0
-        suma_sigma2 = 0.0
-        for vm in self.vms:
-            mu, sigma = vm.calcular_estadisticas_de_uso(self.user_profile)["cpu"]
-            suma_mu += mu
-            suma_sigma2 += sigma**2
-
-        sigma_total = math.sqrt(suma_sigma2)
-        capacidad_efectiva_cpu = suma_mu + k * sigma_total
-
-        # 2. Capacidad física real límite (95%)
-        total_cpu_fisica = servidor["vcpu"]
-        usado_cpu = usado["vcpu"]
-        maximo_seguro = total_cpu_fisica * 0.95 # Se setea en 95%
-        demanda_total = usado_cpu + capacidad_efectiva_cpu
-        print(f"capacidad_efectiva cpu: {capacidad_efectiva_cpu}")
-        print(f"demanda total: {demanda_total}")
-        print(f"maximo seguro: {maximo_seguro}")
-        return demanda_total <= maximo_seguro
+            #Calculamos congestión del recurso
+            congestion = (lambdas[r]*(alfa*capacidad_asignada+(1-alfa)*capacidad_usada) + demanda_slice)/(capacidad_total*lambdas[r])
+            if r == "vcpu":
+                congestion_dicc["congestion_cpu"] = round(congestion, 4)
+            elif r == "ram":
+                congestion_dicc["congestion_ram"] = round(congestion, 4)
+            else:
+                congestion_dicc["congestion_disk"] = round(congestion, 4)
+            
+        return True, None, margenes, congestion_dicc # Cabe
 
     
-    def calcular_congestion_y_Q(self, servidor: Dict[str, float], usado: Dict[str, float]) -> Tuple[float, float]: # 6.2.1,  6.3.2, 6.4.1 
-        """
-        Calcula:
-        - Congestión ponderada del slice s en el servidor i
-        - Factor de espera en cola Q basado en la congestión de CPU
-        Parámetros:
-            servidor: {'vcpu': total_vcpu, 'ram': ..., 'disk': ...}
-            usado:    {'vcpu': used_vcpus, 'ram': ..., 'disk': ...}
-        Retorna:
-            (congestion_ponderada, Q)
-        """
-        # 1. Obtener demanda estimada μ + kσ para cada recurso
-        demanda_total = self.calcular_capacidad_efectica_slice(k)
-        # 2. Obtener límites de sobreaprovisionamiento
-        lambdas = UserProfile.get_overprovisioning_limits(self.user_profile)
-
-        # 3. Calcular congestión por recurso
-        congestion = {}
-        for r in ["vcpu", "ram", "disk"]:
-            total = servidor[r]
-            usado_actual = usado[r]
-            limite_aprovisionado = total * lambdas[r]
-            if r == "vcpu":
-                numerador = usado_actual + demanda_total["cpu"]
-            else:
-                numerador = usado_actual + demanda_total[r]
-            if r == "vcpu":
-                congestion["cpu"] = round(numerador / limite_aprovisionado, 4)
-            else:
-                congestion[r] = round(numerador / limite_aprovisionado, 4)
-        # 4. Obtener pesos del tipo de workload
+    def calcular_congestion_y_Q(self, congestion_dicc: Dict[str, float]) -> Tuple[float, float]: # 6.2.1,  6.3.2, 6.4.1 
+        
+        # 1. Obtener pesos del tipo de workload
         pesos = WorkloadType.get_resource_weights(self.workload_type)
-        # 5. Congestión ponderada
+        # 2. Congestión ponderada
         rho_weighted = (
-            pesos["vcpu"] * congestion["cpu"] +
-            pesos["ram"] * congestion["ram"] +
-            pesos["disk"] * congestion["disk"]
+            pesos["vcpu"] * congestion_dicc["congestion_cpu"] +
+            pesos["ram"] * congestion_dicc["congestion_ram"] +
+            pesos["disk"] * congestion_dicc["congestion_disk"]
         )
         print(f"rho_weighted: {rho_weighted}")
-        # 6. Cálculo de Q en base a congestión CPU (sigmoide)
+        # 3. Cálculo de Q en base a congestión CPU (sigmoide)
         a = 12
         b = 0.7
-        rho_cpu = congestion["cpu"]
+        rho_cpu = congestion_dicc["congestion_cpu"]
         Q = 1 / (1 + math.exp(-a * (rho_cpu - b)))
         return round(rho_weighted, 4), round(Q, 4)
     
-    def calcular_score_ponderado(self, servidor: Dict[str, float], usado: Dict[str, float]) -> float:
+    def calcular_score_ponderado(self, servidor: PhysicalServer) -> float:
         """
         Calcula el score ponderado de asignación del slice en un servidor físico.
-
         Parámetros:
-        - servidor: {'vcpu': total_vcpu, 'ram': ..., 'disk': ...} se extrae CAPACIDAD TOTAL DEL SERVER y CAPACIDAD ASIGNADA A LOS SLICES QUE CORRE
-        - usado: {'vcpu': used_vcpus, 'ram': ..., 'disk': ...} se extrae la CAPACIDAD USADA (en un promedio de 1 hora)
-        - phi: performance relativa del servidor (por defecto 1.0)
-        - num_vms_mismo_sitio: número de VMs del slice ya ubicadas en el mismo servidor o zona
-        - k: factor de confianza estadística (default 1.0), no usaremos
-
+        - servidor: PhysicalServer
         Retorna:
         - score final ponderado (float)
         """
         
         # 1. Verificar si cabe (restricción)
-        cabe, _, margenes = self.cabe_en_servidor_nuevo(servidor, usado, alfa=0.5) #Se setea alfa en 0.5, CORREGIR
+        cabe, _, margenes, congestion_dicc = self.cabe_en_servidor(servidor, alfa=0.5) #Se setea alfa en 0.5
         if not cabe:
             Logger.error("No cabe")
             return 0.0
         else:
             Logger.info(f"Cabe slice en servidor y estos son los márgenes: {margenes}")
         # 2. Calcular congestión ponderada y Q (usa función ya implementada)
-        rho_weighted, Q = self.calcular_congestion_y_Q(servidor, usado)
+        rho_weighted, Q = self.calcular_congestion_y_Q(congestion_dicc)
         Logger.info(f"rho: {rho_weighted}")
         Logger.info(f"Q: {Q}")
         # 3. Factores individuales
-        f_cong = 1 - rho_weighted
-        f_queue = 1 - Q
+        f_cong = 1 - rho_weighted #factor de congestión
+        f_queue = 1 - Q #factor de cola
         # 4. Score ponderado final
-        score = 0.4 * f_cong + 0.3 * f_queue
+        score = 0.6 * f_cong + 0.4 * f_queue
         return round(score, 4)
     
     def seleccionar_mejor_servidor(self, servidores: List[PhysicalServer]) -> Tuple[Optional[PhysicalServer], float]:
-
         """
         Selecciona el mejor servidor (máximo score ponderado) para un slice.
         Parámetros:
@@ -838,24 +683,8 @@ class Slice:
         lista_tupla_servidor_score = [] #Lista de tuplas (server,score)
 
         for server in servidores:
-            servidor = {
-                "vcpu": server.total_vcpus,
-                "ram": server.total_ram,
-                "disk": server.total_disk,
-                "used_disk": server.used_disk,
-                "used_ram": server.used_ram,
-                "used_vcpus": server.used_vcpus
-                
-            }
-            #Obtenido con prometheus
-            usado = {
-                "vcpu": server.used_vcpus,
-                "ram": server.used_ram,
-                "disk": server.used_disk
-            }
-
             # Calculamos el score del slice en el server
-            score = self.calcular_score_ponderado(servidor, usado) # No usamos k
+            score = self.calcular_score_ponderado(server)
             Logger.info(f"{server.name}, score: {score}")
             tupla_server_score = (server, score)
             lista_tupla_servidor_score.append(tupla_server_score)
@@ -1279,129 +1108,6 @@ def health_check():
         "message": "VM Placement está vivito y coleando",
         "timestamp": datetime.now().isoformat()
     }), 200
-
-# Implementamos slice_placement
-@app.route('/slice_placement_v2', methods=['POST']) # Aún no terminada
-def slice_placement_v2():
-    try:
-        data = request.get_json()
-        # 1. Validar entrada mínima
-        required_fields = ["slice_id", "slice_name", "user_profile", "workload_type", "virtual_machines"]
-        if not all(field in data for field in required_fields):
-            return jsonify({"status": "error", "message": "Faltan campos requeridos"}), 400
-        # 2. Crear VMs
-        vms = []
-        for vm_data in data["virtual_machines"]:
-            if "id" not in vm_data or "name" not in vm_data or "flavor_id" not in vm_data:
-                return jsonify({"status": "error", "message": "Formato de VM incorrecto"}), 400
-
-            # Buscar el flavor correspondiente (esto debería venir de BD en entorno real)
-            flavor = Flavor.get_by_id(vm_data["flavor_id"])  # Debes tener esta función implementada
-            if not flavor:
-                return jsonify({"status": "error", "message": f"Flavor ID {vm_data['flavor_id']} no encontrado"}), 404
-
-            vm = VirtualMachine(id=vm_data["id"], name=vm_data["name"], flavor=flavor)
-            vms.append(vm)
-        # 3. Construir el Slice
-        slice_obj = Slice(
-            id=data["slice_id"],
-            name=data["slice_name"],
-            vms=vms,
-            user_profile=data["user_profile"].lower(),
-            workload_type=data["workload_type"].lower()
-        )
-        # 4. Obtener servidores físicos
-        _, servidores = DataManager.load_from_database()
-        if not servidores:
-            return jsonify({"status": "error", "message": "No hay servidores disponibles"}), 500
-        # 5. Resolver placement
-        asignaciones = slice_obj.asignar_vms_distribuidas(servidores, k = 2.0)
-        
-        servidores_asignados = {sid: vms for sid, vms in asignaciones.items() if vms}
-        
-        # Formatear respuesta
-        respuesta = {
-            "status": "success",
-            "slice_id": data["slice_id"],
-            "slice_name": data["slice_name"],
-            "asignaciones": []
-        }
-        
-        if not servidores_asignados:
-            return jsonify({"status": "fail", "message": "Ningún servidor puede alojar las VMs del slice"}), 200
-
-        for servidor_id, vms in servidores_asignados.items():
-            servidor = next((s for s in servidores if s.id == servidor_id), None)
-            if not servidor:
-                continue
-            respuesta["asignaciones"].append({
-                "servidor_id": servidor.id,
-                "servidor_name": servidor.name,
-                "servidor_ip": servidor.ip,
-                "vms_asignadas": [vm.name for vm in vms]
-            })
-
-        Logger.success(f"Slice {data['slice_name']} asignado parcialmente a {len(servidores_asignados)} servidor(es)")
-        return jsonify(respuesta), 200
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/slice_placement_v1', methods=['POST'])
-def slice_placement_v1():
-    try:
-        data = request.get_json()
-        # 1. Validar entrada mínima
-        required_fields = ["slice_id", "slice_name", "user_profile", "workload_type", "virtual_machines"]
-        if not all(field in data for field in required_fields):
-            return jsonify({"status": "error", "message": "Faltan campos requeridos"}), 400
-        # 2. Crear VMs
-        vms = []
-        for vm_data in data["virtual_machines"]:
-            if "id" not in vm_data or "name" not in vm_data or "flavor_id" not in vm_data:
-                return jsonify({"status": "error", "message": "Formato de VM incorrecto"}), 400
-
-            # Buscar el flavor correspondiente (esto debería venir de BD en entorno real)
-            flavor = Flavor.get_by_id(vm_data["flavor_id"])  # Debes tener esta función implementada
-            if not flavor:
-                return jsonify({"status": "error", "message": f"Flavor ID {vm_data['flavor_id']} no encontrado"}), 404
-
-            vm = VirtualMachine(id=vm_data["id"], name=vm_data["name"], flavor=flavor)
-            vms.append(vm)
-        # 3. Construir el Slice
-        slice_obj = Slice(
-            id=data["slice_id"],
-            name=data["slice_name"],
-            vms=vms,
-            user_profile=data["user_profile"].lower(),
-            workload_type=data["workload_type"].lower()
-        )
-        # 4. Obtener servidores físicos
-        _, servidores = DataManager.load_from_database()
-        if not servidores:
-            return jsonify({"status": "error", "message": "No hay servidores disponibles"}), 500
-        # 5. Resolver placement
-        #mejor_servidor, mejor_score = slice_obj.seleccionar_mejor_servidor(servidores, k = 2.0)
-        
-        
-        
-        #Solo valida que no se puede ingresar el slice a 1 servidor, falta reubicarlos
-        #LOGICA DE REUBICACION DE VMS EN SERVIDORES
-        
-        if not mejor_servidor:
-            return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
-
-        return jsonify({
-            "status": "success",
-            "slice_id": data["slice_id"],
-            "slice_name": data["slice_name"],
-            "asignado_a": mejor_servidor.name,
-            "server_ip": mejor_servidor.ip,
-            "score": mejor_score
-        }), 200
-
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/slice_placement_v3', methods=['POST'])
 def slice_placement_v3():
