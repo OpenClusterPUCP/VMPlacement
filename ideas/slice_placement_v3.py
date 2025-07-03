@@ -672,7 +672,7 @@ class Slice:
         score = 0.6 * f_cong + 0.4 * f_queue
         return round(score, 4)
     
-    def seleccionar_mejor_servidor(self, servidores: List[PhysicalServer]) -> Tuple[Optional[PhysicalServer], float]:
+    def score_servidores(self, servidores: List[PhysicalServer]) -> Tuple[Optional[PhysicalServer], float]:
         """
         Selecciona el mejor servidor (máximo score ponderado) para un slice.
         Parámetros:
@@ -1148,23 +1148,33 @@ def slice_placement_v3():
         print(servidores)
         
         # 5. Resolver placement
-        lista_tupla_servidor_score = slice_obj.seleccionar_mejor_servidor(servidores)
+        lista_tupla_servidor_score = slice_obj.score_servidores(servidores)
         for tupla_servidor_score in lista_tupla_servidor_score:
             print(f"Servidor: {tupla_servidor_score[0].name}, score: {tupla_servidor_score[1]}")
         
         # Validar si la lista está vacía o si todos los scores son 0.0
         if not lista_tupla_servidor_score or all(score == 0.0 for _, score in lista_tupla_servidor_score):
+            Logger.failed("Ningún servidor puede alojar el slice")
+            #Se debe aplicar lógica de FASE 2, se debe sacar la VM más pequeña (mayor probabilidad de instanciarse en otro server)
+            #y luego generar el "mini-slice" con esa vm menos e intentar el score en los servers según su ZA y que la otra VM
+            #se instancie en otro server, considerándola como "mini-slice" y haciendo de score para el caso de ZA=PREMIUM
+            
+            
             return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
-
-        """return jsonify({
-            "status": "success",
-            "slice_id": data["slice_id"],
-            "slice_name": data["slice_name"],
-            "asignado_a": mejor_servidor.name,
-            "server_ip": mejor_servidor.ip,
-            "score": mejor_score
-        }), 200"""
-        return jsonify({"status": "ok", "message": "Slice procesado"}), 200
+        else:
+            #Escoger best_server y best_score
+            best_server, best_score = max(lista_tupla_servidor_score, key=lambda x: x[1])
+            #Json Response
+            return jsonify({
+                "status": "success",
+                "slice_id": data["slice_id"],
+                "slice_name": data["slice_name"],
+                "asignado_a": best_server.name,
+                "server_ip": best_server.ip,
+                "score": best_score
+            }), 200
+        
+        
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
