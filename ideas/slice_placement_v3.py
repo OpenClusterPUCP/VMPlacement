@@ -58,13 +58,14 @@ import json
 import random
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Any
 
 # Bibliotecas científicas:
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from scipy.optimize import milp, LinearConstraint, Bounds
+from itertools import combinations
 import math
 
 # Acceso a datos:
