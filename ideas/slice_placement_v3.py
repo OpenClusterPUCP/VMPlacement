@@ -65,7 +65,6 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from scipy.optimize import milp, LinearConstraint, Bounds
-from itertools import combinations
 import math
 
 # Acceso a datos:
@@ -693,7 +692,11 @@ class Slice:
             tupla_server_score = (server, score)
             lista_tupla_servidor_score.append(tupla_server_score)
         return lista_tupla_servidor_score
-
+    
+    def get_resource_weights(self) -> Dict[str, float]:
+        """Obtiene pesos relativos para cada tipo de recurso según el workload"""
+        return WorkloadType.get_resource_weights(self.workload_type)
+    
     def aplicar_fase_2_greedy(self, servidores: List[PhysicalServer]) -> Dict[str, Any]:
         """
         FASE 2: Algoritmo greedy para distribución de slice en múltiples servidores
@@ -925,82 +928,6 @@ class Slice:
             "razon": razon
         }
     
-    def asignar_vms_distribuidas(self, servidores: List[PhysicalServer], k: float = 2.0) -> Tuple[Optional[PhysicalServer], float]:
-        """
-        Selecciona el mejor servidor (máximo score ponderado) para este slice.
-
-        Parámetros:
-        - servidores: lista de servidores con claves 'vcpu', 'used_vcpus', etc.
-        - k: nivel de confianza estadística
-
-        Retorna:
-        - { servidor_id: [vm1, vm2, ...] }
-        """
-        
-        Logger.section("VMs instanciadas")
-        Logger.info(self.vms)
-        
-        ga = 0
-        servidores_scores = []
-        # 1. Calcular score en cada servidor
-        for server in servidores:
-            servidor = {
-                "vcpu": server.total_vcpus,
-                "ram": server.total_ram,
-                "disk": server.total_disk
-            }
-            #Obtenido con prometheus
-            usado = {
-                "vcpu": server.used_vcpus,
-                "ram": server.used_ram,
-                "disk": server.used_disk
-            }
-            # Aquí puedes incluir lógica para contar VMs en mismo sitio si aplica
-            num_vms_mismo_sitio = 0
-            phi = 1.0  # o 1.0 por defecto (puede variar)
-            Logger.section(f"Resultados de {server.name}")
-            Logger.info(f"Recursos nominales: {servidor}")
-            Logger.info(f"Recursos usados: {usado}")
-            score = self.calcular_score_ponderado(servidor, usado, phi, num_vms_mismo_sitio, k)
-            Logger.success(f"score server {ga + 1}: {score}")
-            servidores_scores.append((server, score))
-            ga += 1
-        # 2. Ordenar servidores por score descendente
-        servidores_ordenados = sorted(servidores_scores, key=lambda x: x[1], reverse=True)   
-        # 3. Asignar VMs
-        asignaciones = {srv.id: [] for srv, _ in servidores_ordenados}
-        recursos_usados = {
-                            srv.id: {
-                                "vcpu": srv.used_vcpus,
-                                "ram": srv.used_ram,
-                                "disk": srv.used_disk
-                            }
-                            for srv, _ in servidores_ordenados
-                        }
-        for vm in self.vms:
-            asignada = False
-            for servidor, _ in servidores_ordenados:
-                usado = recursos_usados[servidor.id]
-                cabe = vm.cabe_en_servidor_vm(servidor, usado, self.user_profile, k = 2.0)  # usa perfil
-                seguridad_95 = vm.validacion_seguridad_cpu_vm(servidor, usado, self.user_profile, k = 2.0)
-                if cabe or seguridad_95:
-                    asignaciones[servidor.id].append(vm)
-                    # actualizar recursos usados
-                    usado['vcpu'] += vm.flavor['vcpus']
-                    usado['ram'] += vm.flavor['ram']
-                    usado['disk'] += vm.flavor['disk']
-                    asignada = True
-                    break
-            if not asignada:
-                Logger.warning(f"⚠️ VM {vm.name} no pudo ser asignada a ningún servidor.")
-       
-        return asignaciones
-    
-    def get_resource_weights(self) -> Dict[str, float]:
-        """Obtiene pesos relativos para cada tipo de recurso según el workload"""
-        return WorkloadType.get_resource_weights(self.workload_type)
-    
-
 
 # ===================== UTILIDADES =====================
 class Logger:
@@ -1392,14 +1319,17 @@ def slice_placement_v3():
         
         # Validar si la lista está vacía o si todos los scores son 0.0
         if not lista_tupla_servidor_score or all(score == 0.0 for _, score in lista_tupla_servidor_score):
-            Logger.warning("Ningún servidor puede alojar el slice. Iniciando FASE 2...")
+            Logger.failed("Ningún servidor puede alojar el slice")
+            #Se debe aplicar lógica de FASE 2, se debe sacar la VM más pequeña (mayor probabilidad de instanciarse en otro server)
+            #y luego generar el "mini-slice" con esa vm menos e intentar el score en los servers según su ZA y que la otra VM
+            #se instancie en otro server, considerándola como "mini-slice" y haciendo de score para el caso de ZA=PREMIUM
+            """Logger.warning("Ningún servidor puede alojar el slice. Iniciando FASE 2...")
             resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores)
 
             if resultado_fase2["status"] == "success":
                 return jsonify(resultado_fase2), 200
             else:
-                return jsonify(resultado_fase2), 200
-            
+                return jsonify(resultado_fase2), 200"""
             
             return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
         else:
@@ -1416,6 +1346,7 @@ def slice_placement_v3():
                 "slice_id": data["slice_id"],
                 "slice_name": data["slice_name"],
                 "asignado_a": best_server.name,
+                "server_id": best_server.id,
                 "server_ip": best_server.ip,
                 "score": best_score,
                 "stats_vms": stats_por_vm
