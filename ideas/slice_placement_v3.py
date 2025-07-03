@@ -694,6 +694,236 @@ class Slice:
             lista_tupla_servidor_score.append(tupla_server_score)
         return lista_tupla_servidor_score
 
+    def aplicar_fase_2_greedy(self, servidores: List[PhysicalServer]) -> Dict[str, Any]:
+        """
+        FASE 2: Algoritmo greedy para distribución de slice en múltiples servidores
+        Empieza desde tamaño N-1 porque sabemos que N VMs juntas no caben (FASE 1 falló)
+        """
+        Logger.major_section("INICIANDO FASE 2 - ALGORITMO GREEDY")
+        Logger.info(f"FASE 1 falló con {len(self.vms)} VMs. Iniciando fragmentación...")
+        Logger.info(f"Slice: {self.name}")
+        Logger.info(f"Perfil: {self.user_profile}, Workload: {self.workload_type}")
+        Logger.info(f"Servidores disponibles: {len(servidores)}")
+
+        # Inicialización
+        vms_pendientes = self.vms.copy()
+        asignaciones_finales = {}
+        servidores_usados = []
+        iteracion = 1
+
+        # Bucle principal
+        while vms_pendientes:
+            Logger.section(f"=== ITERACIÓN {iteracion} ===")
+            Logger.info(f"VMs pendientes: {len(vms_pendientes)} - {[vm.name for vm in vms_pendientes]}")
+
+            # Servidores disponibles (excluyendo los ya usados)
+            servidores_disponibles = [s for s in servidores if s.id not in servidores_usados]
+            Logger.info(f"Servidores disponibles: {[s.name for s in servidores_disponibles]}")
+
+            if not servidores_disponibles:
+                Logger.error("No hay más servidores disponibles")
+                return self._generar_respuesta_fallo("No hay servidores disponibles para VMs restantes")
+
+            # CLAVE: Determinar tamaño máximo para esta iteración
+            tamaño_maximo = len(vms_pendientes)
+            if iteracion == 1:
+                # En primera iteración, saltar tamaño completo (ya probado en FASE 1)
+                tamaño_maximo -= 1
+                Logger.info(f"Primera iteración: saltando tamaño {len(vms_pendientes)} (ya probado en FASE 1)")
+
+            if tamaño_maximo < 1:
+                Logger.error("No es posible fragmentar más - tamaño máximo < 1")
+                return self._generar_respuesta_fallo("Fragmentación agotada")
+
+            # Encontrar el mejor grupo para esta iteración
+            mejor_asignacion = self._encontrar_mejor_grupo_acotado(
+                vms_pendientes, servidores_disponibles, tamaño_maximo
+            )
+
+            if not mejor_asignacion:
+                Logger.error("No se encontró asignación viable para las VMs restantes")
+                return self._generar_respuesta_fallo("No se encontró asignación viable")
+
+            # Procesar la asignación
+            vms_asignadas, servidor_seleccionado, score_grupo = mejor_asignacion
+
+            Logger.success(f"✅ Asignación encontrada:")
+            Logger.info(f"   Servidor: {servidor_seleccionado.name}")
+            Logger.info(f"   VMs: {[vm.name for vm in vms_asignadas]} ({len(vms_asignadas)} VMs)")
+            Logger.info(f"   Score: {score_grupo}")
+
+            # Guardar asignación
+            asignaciones_finales[servidor_seleccionado.id] = {
+                "servidor": servidor_seleccionado,
+                "vms": vms_asignadas,
+                "score": score_grupo
+            }
+
+            # Actualizar estado
+            vms_pendientes = [vm for vm in vms_pendientes if vm not in vms_asignadas]
+            servidores_usados.append(servidor_seleccionado.id)
+            iteracion += 1
+
+        Logger.major_section("FASE 2 COMPLETADA EXITOSAMENTE")
+        return self._generar_respuesta_exito(asignaciones_finales)
+
+    def _encontrar_mejor_grupo_acotado(self, vms_pendientes: List[VirtualMachine],
+                                       servidores_disponibles: List[PhysicalServer],
+                                       tamaño_maximo: int) -> Optional[Tuple]:
+        """
+        Encuentra el mejor grupo de VMs con límite de tamaño máximo
+        """
+        Logger.subsection(f"Búsqueda del mejor grupo (tamaño máximo: {tamaño_maximo})")
+
+        # Calcular límite para evitar redundancia
+        n_vms = len(vms_pendientes)
+        tamaño_minimo = max(1, n_vms // 2)  # No evaluar más allá de la mitad
+
+        if tamaño_maximo > tamaño_minimo:
+            Logger.info(f"Evaluando tamaños {tamaño_maximo} hasta {tamaño_minimo} (evitando redundancia)")
+            rango_evaluacion = range(tamaño_maximo, tamaño_minimo - 1, -1)
+        else:
+            Logger.info(f"Evaluando tamaños pequeños: {tamaño_maximo} hasta 1")
+            rango_evaluacion = range(tamaño_maximo, 0, -1)
+
+        # Búsqueda descendente por tamaño
+        for tamaño in rango_evaluacion:
+            Logger.debug(f"Evaluando grupos de tamaño {tamaño}")
+
+            mejores_de_este_tamaño = []
+            num_combinaciones = math.comb(len(vms_pendientes), tamaño)
+            Logger.debug(f"  Combinaciones a evaluar: {num_combinaciones}")
+
+            # Generar y evaluar todas las combinaciones de este tamaño
+            for i, combinacion_vms in enumerate(combinations(vms_pendientes, tamaño)):
+                if i % 10 == 0 and num_combinaciones > 20:  # Log de progreso
+                    Logger.debug(f"  Progreso: {i + 1}/{num_combinaciones}")
+
+                # Evaluar esta combinación en todos los servidores disponibles
+                for servidor in servidores_disponibles:
+                    resultado = self._evaluar_combinacion_fase2(list(combinacion_vms), servidor)
+
+                    if resultado["cabe"]:
+                        mejores_de_este_tamaño.append((
+                            list(combinacion_vms),
+                            servidor,
+                            resultado["score"]
+                        ))
+
+            # Si encontré soluciones de este tamaño, retorno la mejor por score
+            if mejores_de_este_tamaño:
+                mejor_solucion = max(mejores_de_este_tamaño, key=lambda x: x[2])  # Por score puro
+                vms_mejor, servidor_mejor, score_mejor = mejor_solucion
+
+                Logger.info(f"✅ Mejor solución tamaño {tamaño}:")
+                Logger.info(f"   Score: {score_mejor}")
+                Logger.info(f"   Servidor: {servidor_mejor.name}")
+                Logger.info(f"   VMs: {[vm.name for vm in vms_mejor]}")
+
+                return mejor_solucion
+            else:
+                Logger.debug(f"❌ No hay soluciones viables para tamaño {tamaño}")
+
+        Logger.warning("No se encontró ninguna solución viable")
+        return None
+
+    def _evaluar_combinacion_fase2(self, vms_combinacion: List[VirtualMachine],
+                                   servidor: PhysicalServer) -> Dict[str, Any]:
+        """
+        Evalúa una combinación específica de VMs en un servidor específico
+        """
+        try:
+            # Crear slice temporal con esta combinación
+            slice_temporal = Slice(
+                id=f"temp-{hash(tuple(vm.id for vm in vms_combinacion))}",
+                name=f"temporal-{len(vms_combinacion)}vms",
+                vms=vms_combinacion,
+                user_profile=self.user_profile,
+                workload_type=self.workload_type
+            )
+
+            # Usar la función de scoring existente
+            score = slice_temporal.calcular_score_ponderado(servidor)
+
+            return {
+                "score": score,
+                "cabe": score > 0,
+                "vms": vms_combinacion,
+                "servidor": servidor,
+                "tamaño": len(vms_combinacion)
+            }
+
+        except Exception as e:
+            Logger.error(f"Error evaluando combinación: {str(e)}")
+            return {
+                "score": 0.0,
+                "cabe": False,
+                "vms": vms_combinacion,
+                "servidor": servidor,
+                "tamaño": len(vms_combinacion)
+            }
+
+    def _generar_respuesta_exito(self, asignaciones_finales: Dict) -> Dict[str, Any]:
+        """
+        Genera respuesta de éxito para FASE 2
+        """
+        # Calcular estadísticas
+        total_vms = len(self.vms)
+        servidores_utilizados = len(asignaciones_finales)
+        grupo_mas_grande = max(len(asig["vms"]) for asig in asignaciones_finales.values())
+        localidad_maxima = grupo_mas_grande / total_vms
+
+        # Calcular score promedio ponderado
+        score_total_ponderado = 0
+        for asignacion in asignaciones_finales.values():
+            peso = len(asignacion["vms"]) / total_vms
+            score_total_ponderado += asignacion["score"] * peso
+
+        # Construir lista de asignaciones para respuesta
+        asignaciones_detalle = []
+        for server_id, asignacion in asignaciones_finales.items():
+            servidor = asignacion["servidor"]
+            vms = asignacion["vms"]
+
+            asignaciones_detalle.append({
+                "server_id": servidor.id,
+                "server_name": servidor.name,
+                "server_ip": servidor.ip,
+                "vms": [{"id": vm.id, "name": vm.name} for vm in vms],
+                "vms_count": len(vms),
+                "score": asignacion["score"]
+            })
+
+        return {
+            "status": "success",
+            "slice_id": self.id,
+            "slice_name": self.name,
+            "fase": 2,
+            "user_profile": self.user_profile,
+            "workload_type": self.workload_type,
+            "estadisticas": {
+                "total_vms": total_vms,
+                "servidores_utilizados": servidores_utilizados,
+                "grupo_mas_grande": grupo_mas_grande,
+                "localidad_maxima": round(localidad_maxima * 100, 2),  # Porcentaje
+                "score_promedio_ponderado": round(score_total_ponderado, 4)
+            },
+            "asignaciones": asignaciones_detalle,
+            "message": f"Slice distribuido exitosamente en {servidores_utilizados} servidores con localidad máxima de {grupo_mas_grande} VMs"
+        }
+
+    def _generar_respuesta_fallo(self, razon: str) -> Dict[str, Any]:
+        """
+        Genera respuesta de fallo para FASE 2
+        """
+        return {
+            "status": "fail",
+            "slice_id": self.id,
+            "slice_name": self.name,
+            "fase": 2,
+            "message": f"FASE 2 falló: {razon}",
+            "razon": razon
+        }
     
     def asignar_vms_distribuidas(self, servidores: List[PhysicalServer], k: float = 2.0) -> Tuple[Optional[PhysicalServer], float]:
         """
@@ -1162,10 +1392,13 @@ def slice_placement_v3():
         
         # Validar si la lista está vacía o si todos los scores son 0.0
         if not lista_tupla_servidor_score or all(score == 0.0 for _, score in lista_tupla_servidor_score):
-            Logger.failed("Ningún servidor puede alojar el slice")
-            #Se debe aplicar lógica de FASE 2, se debe sacar la VM más pequeña (mayor probabilidad de instanciarse en otro server)
-            #y luego generar el "mini-slice" con esa vm menos e intentar el score en los servers según su ZA y que la otra VM
-            #se instancie en otro server, considerándola como "mini-slice" y haciendo de score para el caso de ZA=PREMIUM
+            Logger.warning("Ningún servidor puede alojar el slice. Iniciando FASE 2...")
+            resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores)
+
+            if resultado_fase2["status"] == "success":
+                return jsonify(resultado_fase2), 200
+            else:
+                return jsonify(resultado_fase2), 200
             
             
             return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
