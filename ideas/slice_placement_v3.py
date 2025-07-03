@@ -277,6 +277,7 @@ class PhysicalServer:
     used_vcpus: int = 0
     used_ram: int = 0
     used_disk: float = 0.0
+    availability_zone: int = 0 #ID de ZA
     
     @property
     def available_vcpus(self) -> int:
@@ -371,7 +372,8 @@ class DatabaseManager:
                     ip, 
                     total_vcpu as total_vcpus, 
                     total_ram, 
-                    total_disk
+                    total_disk,
+                    availability_zone
                 FROM physical_server
                 WHERE server_type = 'worker' AND status = 'active'
                 ORDER BY id
@@ -529,7 +531,7 @@ class Slice:
                 mu, sigma = stats[recurso]
                 suma_mu[recurso] += mu
                 suma_sigma[recurso] += sigma
-                lista_stats_vms.append(stats)
+            lista_stats_vms.append(stats)
 
         # Calcular demanda efectiva = μ + σ
         resultados = {}
@@ -538,7 +540,8 @@ class Slice:
             sigma_total = math.sqrt(suma_sigma[recurso])
             demanda_efectiva = mu_total + sigma_total
             resultados[recurso] = round(demanda_efectiva, 4) # EVALUAR REDONDEO
-
+            
+        self.lista_stats_vms = lista_stats_vms #GUARDA COMO ATRIBUTO DE INSTANCIA
         return resultados, lista_stats_vms #Array de capacidad efectiva por recurso
     
     from typing import Tuple, Optional
@@ -905,7 +908,8 @@ class DataManager:
                     total_disk=float(server_data['total_disk']),
                     used_vcpus=server_data['used_vcpus'], # Por defecto en db es cero ya que se saca de Prometheus
                     used_ram=server_data['used_ram'],
-                    used_disk=float(server_data['used_disk'])
+                    used_disk=float(server_data['used_disk']),
+                    availability_zone=server_data['availability_zone'] #Zona de Disponibilidad (ID)
                 )
                 
                 servers.append(server)
@@ -1138,17 +1142,20 @@ def slice_placement_v3():
             workload_type=data["workload_type"].lower()
         )
         
-            #user_profile: Define los alfas (uso promedio)
-            #workload_type: Define los lambdas (factores de sobreaprovisionamiento)
-        
         # 4. Obtener servidores físicos
         _, servidores = DataManager.load_from_database()
         if not servidores:
             return jsonify({"status": "error", "message": "No hay servidores disponibles"}), 500
-        print(servidores)
+        print(f"TODOS LOS SERVIDORES: {servidores}")
         
+        # 4.1 Filtrar servidores por ZA
+        zona_requerida_id  = int(data["availability_zone"]) #Se manda en base al ID de la ZA
+        Logger.section(f"Filtrando servidores en la zona: {zona_requerida_id}")
+        servidores_zona_requerida = [srv for srv in servidores if srv.availability_zone == zona_requerida_id]
+        if not servidores_zona_requerida:
+            return jsonify({"status": "fail", "message": f"No hay servidores disponibles en la zona ID {zona_requerida_id}"}), 200
         # 5. Resolver placement
-        lista_tupla_servidor_score = slice_obj.score_servidores(servidores)
+        lista_tupla_servidor_score = slice_obj.score_servidores(servidores_zona_requerida) #Se evalúan solo los servidores_zona_requerida
         for tupla_servidor_score in lista_tupla_servidor_score:
             print(f"Servidor: {tupla_servidor_score[0].name}, score: {tupla_servidor_score[1]}")
         
@@ -1164,6 +1171,11 @@ def slice_placement_v3():
         else:
             #Escoger best_server y best_score
             best_server, best_score = max(lista_tupla_servidor_score, key=lambda x: x[1])
+            #Se debe actualizar Base de datos con los mu y sigma calculados de cada VM instanciada
+            stats_por_vm = slice_obj.lista_stats_vms
+            Logger.section("Estadísticas de uso por VM (μ y σ)")
+            print(stats_por_vm)
+            #Las stats también se las pasa al Driver correspondiente
             #Json Response
             return jsonify({
                 "status": "success",
@@ -1171,7 +1183,8 @@ def slice_placement_v3():
                 "slice_name": data["slice_name"],
                 "asignado_a": best_server.name,
                 "server_ip": best_server.ip,
-                "score": best_score
+                "score": best_score,
+                "stats_vms": stats_por_vm
             }), 200
         
         
