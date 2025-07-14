@@ -72,7 +72,7 @@ import mysql.connector
 from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
-PROMETHEUS_URL = "http://10.20.12.98:9090"  # cambia según tu entorno
+PROMETHEUS_URL = "http://192.168.201.1:9090"  # cambia según tu entorno
 
 # ===================== CONFIGURACIÓN DE FLASK =====================
 app = Flask(__name__)
