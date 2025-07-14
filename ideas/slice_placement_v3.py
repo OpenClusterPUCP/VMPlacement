@@ -73,7 +73,7 @@ from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
 
-PROMETHEUS_URL = "http://localhost:9090"  # cambia según tu entorno
+PROMETHEUS_URL = "http://192.168.201.1:9090"  # cambia según tu entorno
 # eureka
 from py_eureka_client import eureka_client
 from itertools import combinations
