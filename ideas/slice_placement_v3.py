@@ -84,8 +84,8 @@ debug = False
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",
-    "port": 3306,
+    "password": "Branko",
+    "port": 4000,
     "database": "cloud_v3"
 }
 
