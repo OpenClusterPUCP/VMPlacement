@@ -73,7 +73,7 @@ from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
 
-PROMETHEUS_URL = "http://192.168.201.1:9090"  # cambia según tu entorno
+PROMETHEUS_URL = "http://localhost:9090"  # cambia según tu entorno
 # eureka
 from py_eureka_client import eureka_client
 from itertools import combinations
@@ -154,6 +154,56 @@ def consultar_prometheus(query):
         Logger.error(f"Error al consultar Prometheus: {e}")
         return []
 
+@dataclass
+class AvailabilityZone:
+    """Define zonas de disponibilidad con diferentes límites de sobreaprovisionamiento"""
+    LOW_TIER = 3  # ID en BD
+    PREMIUM = 1  # ID en BD
+    VIP = 2  # ID en BD
+
+    @staticmethod
+    def get_overprovisioning_limits_by_zone(zone_id: int) -> Dict[str, float]:
+        """
+        Devuelve límites de sobreaprovisionamiento según la zona de disponibilidad
+
+        Parámetros:
+        - zone_id: ID de la zona en la base de datos
+
+        Retorna:
+        - Dict con factores λ por recurso
+        """
+        # Según Tabla 3 del LaTeX: Límites de Sobreaprovisionamiento por Zona
+        zone_limits = {
+            AvailabilityZone.LOW_TIER: {  # ID 3 - LOW TIER
+                "vcpu": 2.5,
+                "ram": 1.4,
+                "disk": 1.0
+            },
+            AvailabilityZone.PREMIUM: {  # ID 1 - PREMIUM
+                "vcpu": 2.0,
+                "ram": 1.2,
+                "disk": 1.0
+            },
+            AvailabilityZone.VIP: {  # ID 2 - VIP
+                "vcpu": 1.6,
+                "ram": 1.1,
+                "disk": 1.0
+            }
+        }
+
+        # Retornar límites de la zona o PREMIUM por defecto
+        return zone_limits.get(zone_id, zone_limits[AvailabilityZone.PREMIUM])
+
+    @staticmethod
+    def get_zone_description(zone_id: int) -> str:
+        """Retorna descripción de la zona para logs"""
+        descriptions = {
+            AvailabilityZone.LOW_TIER: "LOW TIER (Máximo sobreaprovisionamiento)",
+            AvailabilityZone.PREMIUM: "PREMIUM (Sobreaprovisionamiento moderado)",
+            AvailabilityZone.VIP: "VIP (Sobreaprovisionamiento conservador)"
+        }
+        return descriptions.get(zone_id, f"Zona ID {zone_id}")
+
 
 @dataclass
 class Flavor:
@@ -184,19 +234,17 @@ class Flavor:
 
 
 @dataclass
+@dataclass
 class UserProfile:
     """Define perfiles de usuario con diferentes patrones de consumo de recursos"""
-    ALUMNO = "alumno"  # Uso básico, bajo consumo
-    JP = "jp"  # Uso intermedio
-    MAESTRO = "maestro"  # Uso avanzado
-    INVESTIGADOR = "investigador"  # Uso intensivo
+    ALUMNO = "alumno"
+    JP = "jp"
+    MAESTRO = "maestro"
+    INVESTIGADOR = "investigador"
 
     @staticmethod
     def get_resource_usage_factors(profile: str) -> Dict[str, float]:
-        """
-        Devuelve factores de uso real de recursos para cada perfil
-        (porcentaje del flavor que realmente utilizan en promedio)
-        """
+        """Factores de uso real"""
         profiles = {
             UserProfile.ALUMNO: {"vcpu": 0.3, "ram": 0.4, "disk": 0.2},
             UserProfile.JP: {"vcpu": 0.5, "ram": 0.6, "disk": 0.3},
@@ -207,33 +255,14 @@ class UserProfile:
 
     @staticmethod
     def get_workload_variability(profile: str) -> float:
-        """
-        Devuelve factor de variabilidad de carga por perfil
-        (qué tanto puede variar el uso en picos durante el ciclo de vida)
-        """
+        """Factores de variabilidad β (sin cambios)"""
         variability = {
-            UserProfile.ALUMNO: 1.3,  # 30% de variabilidad
-            UserProfile.JP: 1.4,  # 40% de variabilidad
-            UserProfile.MAESTRO: 1.2,  # 20% de variabilidad
-            UserProfile.INVESTIGADOR: 1.05  # 5% de variabilidad
+            UserProfile.ALUMNO: 1.3,
+            UserProfile.JP: 1.4,
+            UserProfile.MAESTRO: 1.2,
+            UserProfile.INVESTIGADOR: 1.05
         }
         return variability.get(profile.lower(), 1.5)
-
-    @staticmethod
-    def get_overprovisioning_limits(profile: str) -> Dict[str, float]:
-        """
-        Devuelve límites de sobreaprovisionamiento permitidos por SLA
-        según el perfil de usuario (LÍMITES REDUCIDOS)
-        """
-        # Perfiles con mayor prioridad tienen límites más estrictos
-        # TODOS LOS VALORES REDUCIDOS PARA MAYOR SEGURIDAD
-        limits = {
-            UserProfile.ALUMNO: {"vcpu": 2.0, "ram": 1.2, "disk": 3.0},  # Reducidos de 3.0/1.5/5.0
-            UserProfile.JP: {"vcpu": 1.7, "ram": 1.1, "disk": 2.5},  # Reducidos de 2.5/1.4/4.0
-            UserProfile.MAESTRO: {"vcpu": 1.5, "ram": 1.1, "disk": 2.0},  # Reducidos de 2.0/1.3/3.0
-            UserProfile.INVESTIGADOR: {"vcpu": 1.3, "ram": 1.05, "disk": 1.5}  # Reducidos de 1.5/1.2/2.0
-        }
-        return limits.get(profile.lower(), limits[UserProfile.ALUMNO])
 
 
 @dataclass
@@ -637,38 +666,41 @@ class Slice:
         """
         congestion_dicc = {"congestion_cpu": 0.0, "congestion_ram": 0.0, "congestion_disk": 0.0}
 
-        # 1. Obtener demanda efectiva (μ + σ) y lista_stats_vms para guardar en db si se instancia el slice
+        # 1. Obtener demanda efectiva del slice
         demanda_efectiva, lista_stats_vms = self.calcular_demanda_efectica_slice_correlacionado()
         Logger.info(f"Demanda efectiva del slice: {demanda_efectiva}")
-        Logger.info(f"Lista stats: {lista_stats_vms}")
-        # 2. Obtener límites de sobreaprovisionamiento por perfil
-        lambdas = UserProfile.get_overprovisioning_limits(self.user_profile)
-        Logger.info(f"lambdas: {lambdas}")
-        # 3. Evaluar para cada recurso
+
+        # 2. CORREGIDO: Obtener límites por ZONA DE DISPONIBILIDAD (no por perfil)
+        lambdas = AvailabilityZone.get_overprovisioning_limits_by_zone(servidor.availability_zone)
+        zona_desc = AvailabilityZone.get_zone_description(servidor.availability_zone)
+        Logger.info(f"Zona: {zona_desc} - Factores λ: {lambdas}")
+
+        # 3. Evaluar para cada recurso (resto sin cambios)
         margenes = {}
         for r in ["vcpu", "ram", "disk"]:
-            # Capacidades calculadas del server
             capacidad_total, capacidad_usada, capacidad_asignada = self.capacidades_function(r, servidor)
             Logger.info(f"[{r}] Total: {capacidad_total}, Usada: {capacidad_usada}, Asignada: {capacidad_asignada}")
-            # Capacidad disponible del server
+
+            # Capacidad disponible usando λ de la zona
             capacidad_disponible_server = lambdas[r] * (
-                        capacidad_total - alfa * capacidad_asignada - (1 - alfa) * capacidad_usada)
-            # Demanda del slice en base al recurso
+                    capacidad_total - alfa * capacidad_asignada - (1 - alfa) * capacidad_usada)
+
             demanda_slice = self.obtener_demanda_slice(r, demanda_efectiva)
-            # margen del recurso analizado (cpu, ram, disk)
-            margen = round(capacidad_disponible_server - demanda_slice,
-                           4)  # margen entre demanda la capacidad disponible del server y la demanda del slice
+            margen = round(capacidad_disponible_server - demanda_slice, 4)
+
             if r == "vcpu":
                 margenes["cpu"] = margen
             else:
                 margenes[r] = margen
-            # Verificamos restricción
-            if demanda_slice > capacidad_disponible_server:
-                return False, r, margenes, None  # No cabe
 
-            # Calculamos congestión del recurso
+            # Verificar restricción
+            if demanda_slice > capacidad_disponible_server:
+                return False, r, margenes, None
+
+            # Calcular congestión usando λ de la zona
             congestion = (lambdas[r] * (alfa * capacidad_asignada + (1 - alfa) * capacidad_usada) + demanda_slice) / (
-                        capacidad_total * lambdas[r])
+                    capacidad_total * lambdas[r])
+
             if r == "vcpu":
                 congestion_dicc["congestion_cpu"] = round(congestion, 4)
             elif r == "ram":
@@ -676,7 +708,7 @@ class Slice:
             else:
                 congestion_dicc["congestion_disk"] = round(congestion, 4)
 
-        return True, None, margenes, congestion_dicc  # Cabe
+        return True, None, margenes, congestion_dicc
 
     def calcular_congestion_y_Q(self, congestion_dicc: Dict[str, float]) -> Tuple[
         float, float]:  # 6.2.1,  6.3.2, 6.4.1
@@ -752,10 +784,10 @@ class Slice:
     def aplicar_fase_2_greedy(self, servidores: List[PhysicalServer]) -> Dict[str, Any]:
         """
         FASE 2: Algoritmo greedy para distribución de slice en múltiples servidores
-        Empieza desde tamaño N-1 porque sabemos que N VMs juntas no caben (FASE 1 falló)
+        Implementa remoción iterativa de VMs de menor peso según workload
         """
-        Logger.major_section("INICIANDO FASE 2 - ALGORITMO GREEDY")
-        Logger.info(f"FASE 1 falló con {len(self.vms)} VMs. Iniciando fragmentación...")
+        Logger.major_section("INICIANDO FASE 2 - ALGORITMO GREEDY POR PESO DE VM")
+        Logger.info(f"FASE 1 falló con {len(self.vms)} VMs. Iniciando fragmentación greedy...")
         Logger.info(f"Slice: {self.name}")
         Logger.info(f"Perfil: {self.user_profile}, Workload: {self.workload_type}")
         Logger.info(f"Servidores disponibles: {len(servidores)}")
@@ -766,7 +798,7 @@ class Slice:
         servidores_usados = []
         iteracion = 1
 
-        # Bucle principal
+        # Bucle principal: mientras haya VMs pendientes
         while vms_pendientes:
             Logger.section(f"=== ITERACIÓN {iteracion} ===")
             Logger.info(f"VMs pendientes: {len(vms_pendientes)} - {[vm.name for vm in vms_pendientes]}")
@@ -779,21 +811,8 @@ class Slice:
                 Logger.error("No hay más servidores disponibles")
                 return self._generar_respuesta_fallo("No hay servidores disponibles para VMs restantes")
 
-            # CLAVE: Determinar tamaño máximo para esta iteración
-            tamaño_maximo = len(vms_pendientes)
-            if iteracion == 1:
-                # En primera iteración, saltar tamaño completo (ya probado en FASE 1)
-                tamaño_maximo -= 1
-                Logger.info(f"Primera iteración: saltando tamaño {len(vms_pendientes)} (ya probado en FASE 1)")
-
-            if tamaño_maximo < 1:
-                Logger.error("No es posible fragmentar más - tamaño máximo < 1")
-                return self._generar_respuesta_fallo("Fragmentación agotada")
-
-            # Encontrar el mejor grupo para esta iteración
-            mejor_asignacion = self._encontrar_mejor_grupo_acotado(
-                vms_pendientes, servidores_disponibles, tamaño_maximo
-            )
+            # Encontrar el fragmento más grande que quepa usando remoción greedy
+            mejor_asignacion = self._encontrar_fragmento_greedy(vms_pendientes, servidores_disponibles)
 
             if not mejor_asignacion:
                 Logger.error("No se encontró asignación viable para las VMs restantes")
@@ -822,77 +841,117 @@ class Slice:
         Logger.major_section("FASE 2 COMPLETADA EXITOSAMENTE")
         return self._generar_respuesta_exito(asignaciones_finales)
 
-    def _encontrar_mejor_grupo_acotado(self, vms_pendientes: List[VirtualMachine],
-                                       servidores_disponibles: List[PhysicalServer],
-                                       tamaño_maximo: int) -> Optional[Tuple]:
+    def _calcular_peso_vm(self, vm: VirtualMachine) -> float:
         """
-        Encuentra el mejor grupo de VMs con límite de tamaño máximo
+        Calcula el peso de una VM según el tipo de workload del slice
+
+        Parámetros:
+        - vm: VirtualMachine a evaluar
+
+        Retorna:
+        - float: peso de la VM según workload
         """
-        Logger.subsection(f"Búsqueda del mejor grupo (tamaño máximo: {tamaño_maximo})")
+        # Obtener estadísticas de uso de la VM
+        stats = vm.calcular_estadisticas_de_uso(self.user_profile)
 
-        # Calcular límite para evitar redundancia
-        n_vms = len(vms_pendientes)
-        tamaño_minimo = max(1, n_vms // 2)  # No evaluar más allá de la mitad
+        # Obtener pesos del workload
+        pesos = WorkloadType.get_resource_weights(self.workload_type)
 
-        if tamaño_maximo > tamaño_minimo:
-            Logger.info(f"Evaluando tamaños {tamaño_maximo} hasta {tamaño_minimo} (evitando redundancia)")
-            rango_evaluacion = range(tamaño_maximo, tamaño_minimo - 1, -1)
-        else:
-            Logger.info(f"Evaluando tamaños pequeños: {tamaño_maximo} hasta 1")
-            rango_evaluacion = range(tamaño_maximo, 0, -1)
+        # Calcular demanda efectiva por recurso (μ + σ)
+        de_cpu = stats["cpu"][0] + stats["cpu"][1]  # μ + σ para CPU
+        de_ram = stats["ram"][0] + stats["ram"][1]  # μ + σ para RAM
+        de_disk = stats["disk"][0] + stats["disk"][1]  # μ + σ para DISK
 
-        # Búsqueda descendente por tamaño
-        for tamaño in rango_evaluacion:
-            Logger.debug(f"Evaluando grupos de tamaño {tamaño}")
+        # Peso ponderado según workload
+        peso = (pesos["vcpu"] * de_cpu +
+                pesos["ram"] * de_ram +
+                pesos["disk"] * de_disk)
 
-            mejores_de_este_tamaño = []
-            num_combinaciones = math.comb(len(vms_pendientes), tamaño)
-            Logger.debug(f"  Combinaciones a evaluar: {num_combinaciones}")
+        Logger.debug(f"VM {vm.name}: CPU={de_cpu:.2f}, RAM={de_ram:.2f}, DISK={de_disk:.2f} -> Peso={peso:.4f}")
+        return round(peso, 4)
 
-            # Generar y evaluar todas las combinaciones de este tamaño
-            for i, combinacion_vms in enumerate(combinations(vms_pendientes, tamaño)):
-                if i % 10 == 0 and num_combinaciones > 20:  # Log de progreso
-                    Logger.debug(f"  Progreso: {i + 1}/{num_combinaciones}")
+    def _encontrar_fragmento_greedy(self, vms_pendientes: List[VirtualMachine],
+                                    servidores_disponibles: List[PhysicalServer]) -> Optional[Tuple]:
+        """
+        Encuentra el fragmento más grande posible usando remoción greedy de VMs de menor peso
 
-                # Evaluar esta combinación en todos los servidores disponibles
-                for servidor in servidores_disponibles:
-                    resultado = self._evaluar_combinacion_fase2(list(combinacion_vms), servidor)
+        Parámetros:
+        - vms_pendientes: VMs que quedan por asignar
+        - servidores_disponibles: Servidores que no han sido usados en este slice
 
-                    if resultado["cabe"]:
-                        mejores_de_este_tamaño.append((
-                            list(combinacion_vms),
-                            servidor,
-                            resultado["score"]
-                        ))
+        Retorna:
+        - Tuple(vms_asignadas, servidor, score) o None si no encuentra solución
+        """
+        Logger.subsection(f"Búsqueda greedy de fragmento (VMs pendientes: {len(vms_pendientes)})")
 
-            # Si encontré soluciones de este tamaño, retorno la mejor por score
-            if mejores_de_este_tamaño:
-                mejor_solucion = max(mejores_de_este_tamaño, key=lambda x: x[2])  # Por score puro
-                vms_mejor, servidor_mejor, score_mejor = mejor_solucion
+        # Calcular pesos de todas las VMs pendientes
+        vms_con_pesos = []
+        for vm in vms_pendientes:
+            peso = self._calcular_peso_vm(vm)
+            vms_con_pesos.append((vm, peso))
 
-                Logger.info(f"✅ Mejor solución tamaño {tamaño}:")
-                Logger.info(f"   Score: {score_mejor}")
-                Logger.info(f"   Servidor: {servidor_mejor.name}")
-                Logger.info(f"   VMs: {[vm.name for vm in vms_mejor]}")
+        # Ordenar VMs por peso (menor a mayor) para remoción greedy
+        vms_con_pesos.sort(key=lambda x: x[1])
+        Logger.info(f"VMs ordenadas por peso: {[(vm.name, peso) for vm, peso in vms_con_pesos]}")
 
-                return mejor_solucion
+        # Empezar con todas las VMs pendientes
+        fragmento_actual = [vm for vm, _ in vms_con_pesos]
+
+        # Remoción greedy: ir quitando VMs de menor peso hasta que quepa
+        while fragmento_actual:
+            Logger.debug(f"Evaluando fragmento de {len(fragmento_actual)} VMs: {[vm.name for vm in fragmento_actual]}")
+
+            # Probar este fragmento en todos los servidores disponibles
+            mejor_servidor = None
+            mejor_score = 0.0
+
+            for servidor in servidores_disponibles:
+                resultado = self._evaluar_fragmento_en_servidor(fragmento_actual, servidor)
+
+                if resultado["cabe"] and resultado["score"] > mejor_score:
+                    mejor_score = resultado["score"]
+                    mejor_servidor = servidor
+
+            # Si encontramos un servidor que funciona, retornamos esta solución
+            if mejor_servidor:
+                Logger.success(f"✅ Fragmento viable encontrado:")
+                Logger.info(f"   Tamaño: {len(fragmento_actual)} VMs")
+                Logger.info(f"   Servidor: {mejor_servidor.name}")
+                Logger.info(f"   Score: {mejor_score}")
+                Logger.info(f"   VMs: {[vm.name for vm in fragmento_actual]}")
+
+                return (fragmento_actual, mejor_servidor, mejor_score)
+
+            # Si no cabe, remover la VM de menor peso y continuar
+            if len(fragmento_actual) > 1:
+                vm_removida = fragmento_actual.pop(0)  # Primer elemento = menor peso
+                Logger.debug(f"❌ Fragmento no cabe. Removiendo VM de menor peso: {vm_removida.name}")
             else:
-                Logger.debug(f"❌ No hay soluciones viables para tamaño {tamaño}")
+                # Solo queda 1 VM y tampoco cabe
+                Logger.error(f"❌ Ni siquiera la VM individual {fragmento_actual[0].name} cabe en algún servidor")
+                break
 
-        Logger.warning("No se encontró ninguna solución viable")
+        Logger.warning("No se encontró fragmento viable")
         return None
 
-    def _evaluar_combinacion_fase2(self, vms_combinacion: List[VirtualMachine],
-                                   servidor: PhysicalServer) -> Dict[str, Any]:
+    def _evaluar_fragmento_en_servidor(self, vms_fragmento: List[VirtualMachine],
+                                       servidor: PhysicalServer) -> Dict[str, Any]:
         """
-        Evalúa una combinación específica de VMs en un servidor específico
+        Evalúa si un fragmento específico de VMs cabe en un servidor específico
+
+        Parámetros:
+        - vms_fragmento: Lista de VMs del fragmento
+        - servidor: Servidor a evaluar
+
+        Retorna:
+        - Dict con resultado de la evaluación
         """
         try:
-            # Crear slice temporal con esta combinación
+            # Crear slice temporal con este fragmento
             slice_temporal = Slice(
-                id=f"temp-{hash(tuple(vm.id for vm in vms_combinacion))}",
-                name=f"temporal-{len(vms_combinacion)}vms",
-                vms=vms_combinacion,
+                id=f"temp-{hash(tuple(vm.id for vm in vms_fragmento))}",
+                name=f"temporal-{len(vms_fragmento)}vms",
+                vms=vms_fragmento,
                 user_profile=self.user_profile,
                 workload_type=self.workload_type
             )
@@ -903,20 +962,22 @@ class Slice:
             return {
                 "score": score,
                 "cabe": score > 0,
-                "vms": vms_combinacion,
+                "vms": vms_fragmento,
                 "servidor": servidor,
-                "tamaño": len(vms_combinacion)
+                "tamaño": len(vms_fragmento)
             }
 
         except Exception as e:
-            Logger.error(f"Error evaluando combinación: {str(e)}")
+            Logger.error(f"Error evaluando fragmento: {str(e)}")
             return {
                 "score": 0.0,
                 "cabe": False,
-                "vms": vms_combinacion,
+                "vms": vms_fragmento,
                 "servidor": servidor,
-                "tamaño": len(vms_combinacion)
+                "tamaño": len(vms_fragmento)
             }
+
+
 
     def _generar_respuesta_exito(self, asignaciones_finales: Dict) -> Dict[str, Any]:
         """
@@ -1561,7 +1622,7 @@ def slice_placement_v3():
 
                 return jsonify({
                     "status": "fail",
-                    "message": "No se puede colocar el slice en ningún servidor disponible en la zona de disponibilidad",
+                    "message": "No se puede colocar el slice en la zona de disponibilidad. Capacidad insuficiente.",
                     "slice_id": data["slice_id"],
                     "slice_name": data["slice_name"],
                     "availability_zone": zona_requerida_id,
