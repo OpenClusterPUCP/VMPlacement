@@ -72,7 +72,11 @@ import mysql.connector
 from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
+
 PROMETHEUS_URL = "http://192.168.201.1:9090"  # cambia según tu entorno
+# eureka
+from py_eureka_client import eureka_client
+from itertools import combinations
 
 # ===================== CONFIGURACIÓN DE FLASK =====================
 app = Flask(__name__)
@@ -80,9 +84,49 @@ host = '0.0.0.0'
 port = 6001
 debug = False
 
+# ===================== CONFIGURACIÓN DE EUREKA =====================
+eureka_server = "http://10.20.12.214:8080"
+
+# Configuración de Eureka
+eureka_client.init(
+    eureka_server=eureka_server,
+    app_name="vm-placement",
+    instance_port=port,
+    instance_host="localhost",
+    renewal_interval_in_secs=30,
+    duration_in_secs=90,
+)
+
+
+def get_service_instance(service_name: str) -> dict:
+    """
+    Obtiene información de la instancia de un servicio registrado en Eureka.
+    """
+    try:
+        Logger.debug(f"Buscando instancia de servicio: {service_name}")
+        instance = eureka_client.get_client().applications.get_application(service_name)
+        if not instance or not instance.up_instances:
+            Logger.error(f"Servicio {service_name} no encontrado en Eureka")
+            return None
+
+        instance = instance.up_instances[0]
+        service_info = {
+            'ipAddr': instance.ipAddr,
+            'port': instance.port.port,
+            'hostName': instance.hostName
+        }
+
+        Logger.debug(f"Instancia encontrada: {json.dumps(service_info, indent=2)}")
+        return service_info
+
+    except Exception as e:
+        Logger.error(f"Error obteniendo instancia de {service_name}: {str(e)}")
+        return None
+
+
 # ===================== CONFIGURACIÓN BD =====================
 DB_CONFIG = {
-    "host": "localhost",
+    "host": "10.20.12.214",
     "user": "root",
     "password": "Branko",
     "port": 4000,
@@ -97,126 +141,18 @@ POOL_CONFIG = {
 
 
 def consultar_prometheus(query):
-    """
-    Consulta Prometheus con logging mejorado para verificar conectividad
-    """
     try:
-        Logger.debug(f"Consultando Prometheus: {PROMETHEUS_URL}")
-        Logger.debug(f"Query: {query}")
-
-        # Realizar la consulta
-        response = requests.get(
-            f"{PROMETHEUS_URL}/api/v1/query",
-            params={"query": query},
-            timeout=10  # Añadir timeout
-        )
-
-        Logger.debug(f"Código de respuesta HTTP: {response.status_code}")
-
-        if response.status_code != 200:
-            Logger.error(f"Error HTTP al consultar Prometheus: {response.status_code}")
-            Logger.error(f"Respuesta: {response.text}")
-            return []
-
+        response = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query})
         result = response.json()
-        Logger.debug(f"Respuesta JSON de Prometheus: {json.dumps(result, indent=2)}")
-
+        print("DEBUG Prometheus response:", result)
         if result["status"] == "success":
-            data_result = result["data"]["result"]
-            Logger.success(f"Consulta Prometheus exitosa - {len(data_result)} resultados obtenidos")
-
-            # Log detallado de los resultados
-            for i, metric in enumerate(data_result):
-                if "value" in metric and len(metric["value"]) >= 2:
-                    timestamp, value = metric["value"]
-                    instance = metric.get("metric", {}).get("instance", "unknown")
-                    Logger.debug(f"  Resultado {i + 1}: instance={instance}, value={value}, timestamp={timestamp}")
-
-            return data_result
+            return result["data"]["result"]
         else:
-            Logger.error(f"Error en consulta Prometheus: {result}")
+            print("hola")
             return []
-
-    except requests.exceptions.Timeout:
-        Logger.error(f"Timeout al conectar con Prometheus en {PROMETHEUS_URL}")
-        return []
-    except requests.exceptions.ConnectionError:
-        Logger.error(f"Error de conexión con Prometheus en {PROMETHEUS_URL}")
-        Logger.error("Verificar que Prometheus esté corriendo y sea accesible")
-        return []
-    except requests.exceptions.RequestException as e:
-        Logger.error(f"Error de solicitud HTTP a Prometheus: {str(e)}")
-        return []
-    except json.JSONDecodeError as e:
-        Logger.error(f"Error decodificando respuesta JSON de Prometheus: {str(e)}")
-        Logger.error(f"Respuesta recibida: {response.text if 'response' in locals() else 'No disponible'}")
-        return []
     except Exception as e:
-        Logger.error(f"Error inesperado consultando Prometheus: {str(e)}")
-        Logger.debug(f"Traceback: {traceback.format_exc()}")
+        Logger.error(f"Error al consultar Prometheus: {e}")
         return []
-
-
-def verificar_conexion_prometheus():
-    """
-    Verifica la conectividad con Prometheus al iniciar el servicio
-    """
-    Logger.section("VERIFICANDO CONEXIÓN CON PROMETHEUS")
-    Logger.info(f"URL de Prometheus: {PROMETHEUS_URL}")
-
-    try:
-        # Realizar una consulta simple para verificar conectividad
-        test_query = "up"
-        Logger.debug(f"Realizando consulta de prueba: {test_query}")
-
-        response = requests.get(
-            f"{PROMETHEUS_URL}/api/v1/query",
-            params={"query": test_query},
-            timeout=5
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result["status"] == "success":
-                instances_up = len(result["data"]["result"])
-                Logger.success(f"✅ Conexión con Prometheus establecida correctamente")
-                Logger.info(f"📊 {instances_up} instancias monitoreadas detectadas")
-
-                # Mostrar algunas instancias detectadas
-                if instances_up > 0:
-                    Logger.debug("Instancias detectadas:")
-                    for i, metric in enumerate(result["data"]["result"][:5]):  # Mostrar max 5
-                        instance = metric.get("metric", {}).get("instance", "unknown")
-                        job = metric.get("metric", {}).get("job", "unknown")
-                        value = metric["value"][1] if "value" in metric else "unknown"
-                        Logger.debug(f"  {i + 1}. {instance} (job: {job}, up: {value})")
-
-                    if instances_up > 5:
-                        Logger.debug(f"  ... y {instances_up - 5} instancias más")
-
-                return True
-            else:
-                Logger.error(f"❌ Prometheus respondió con error: {result}")
-                return False
-        else:
-            Logger.error(f"❌ Error HTTP al conectar con Prometheus: {response.status_code}")
-            Logger.error(f"Respuesta: {response.text}")
-            return False
-
-    except requests.exceptions.Timeout:
-        Logger.error(f"❌ Timeout conectando con Prometheus ({PROMETHEUS_URL})")
-        Logger.warning("🔍 Verificar que Prometheus esté corriendo en la URL especificada")
-        return False
-    except requests.exceptions.ConnectionError:
-        Logger.error(f"❌ No se puede conectar con Prometheus en {PROMETHEUS_URL}")
-        Logger.warning("🔍 Verificar:")
-        Logger.warning("   - Que Prometheus esté corriendo")
-        Logger.warning("   - Que la URL sea correcta")
-        Logger.warning("   - Que no haya firewall bloqueando la conexión")
-        return False
-    except Exception as e:
-        Logger.error(f"❌ Error inesperado verificando Prometheus: {str(e)}")
-        return False
 
 
 @dataclass
@@ -229,10 +165,10 @@ class Flavor:
     vcpus: int
     ram: int  # En MB (entero en BD)
     disk: float  # En GB (decimal en BD con 1 decimal)
-    
+
     def __str__(self):
         return f"Flavor {self.id}: {self.name} (vCPUs: {self.vcpus}, RAM: {self.ram} MB, Disk: {self.disk:.1f} GB)"
-    
+
     def get_by_id(flavor_id: int) -> dict:
         flavors = DatabaseManager.get_active_flavors()
         for flavor in flavors:
@@ -246,14 +182,15 @@ class Flavor:
                 }
         raise ValueError(f"No se encontró flavor con ID {flavor_id}")
 
+
 @dataclass
 class UserProfile:
     """Define perfiles de usuario con diferentes patrones de consumo de recursos"""
-    ALUMNO = "alumno"      # Uso básico, bajo consumo
-    JP = "jp"              # Uso intermedio
-    MAESTRO = "maestro"    # Uso avanzado
+    ALUMNO = "alumno"  # Uso básico, bajo consumo
+    JP = "jp"  # Uso intermedio
+    MAESTRO = "maestro"  # Uso avanzado
     INVESTIGADOR = "investigador"  # Uso intensivo
-    
+
     @staticmethod
     def get_resource_usage_factors(profile: str) -> Dict[str, float]:
         """
@@ -267,7 +204,7 @@ class UserProfile:
             UserProfile.INVESTIGADOR: {"vcpu": 0.9, "ram": 0.9, "disk": 0.5}
         }
         return profiles.get(profile.lower(), profiles[UserProfile.ALUMNO])
-    
+
     @staticmethod
     def get_workload_variability(profile: str) -> float:
         """
@@ -275,13 +212,13 @@ class UserProfile:
         (qué tanto puede variar el uso en picos durante el ciclo de vida)
         """
         variability = {
-            UserProfile.ALUMNO: 1.3,      # 30% de variabilidad
-            UserProfile.JP: 1.4,          # 40% de variabilidad
-            UserProfile.MAESTRO: 1.2,     # 20% de variabilidad
-            UserProfile.INVESTIGADOR: 1.05 # 5% de variabilidad
+            UserProfile.ALUMNO: 1.3,  # 30% de variabilidad
+            UserProfile.JP: 1.4,  # 40% de variabilidad
+            UserProfile.MAESTRO: 1.2,  # 20% de variabilidad
+            UserProfile.INVESTIGADOR: 1.05  # 5% de variabilidad
         }
         return variability.get(profile.lower(), 1.5)
-    
+
     @staticmethod
     def get_overprovisioning_limits(profile: str) -> Dict[str, float]:
         """
@@ -292,20 +229,21 @@ class UserProfile:
         # TODOS LOS VALORES REDUCIDOS PARA MAYOR SEGURIDAD
         limits = {
             UserProfile.ALUMNO: {"vcpu": 2.0, "ram": 1.2, "disk": 3.0},  # Reducidos de 3.0/1.5/5.0
-            UserProfile.JP: {"vcpu": 1.7, "ram": 1.1, "disk": 2.5},      # Reducidos de 2.5/1.4/4.0
-            UserProfile.MAESTRO: {"vcpu": 1.5, "ram": 1.1, "disk": 2.0}, # Reducidos de 2.0/1.3/3.0
-            UserProfile.INVESTIGADOR: {"vcpu": 1.3, "ram": 1.05, "disk": 1.5} # Reducidos de 1.5/1.2/2.0
+            UserProfile.JP: {"vcpu": 1.7, "ram": 1.1, "disk": 2.5},  # Reducidos de 2.5/1.4/4.0
+            UserProfile.MAESTRO: {"vcpu": 1.5, "ram": 1.1, "disk": 2.0},  # Reducidos de 2.0/1.3/3.0
+            UserProfile.INVESTIGADOR: {"vcpu": 1.3, "ram": 1.05, "disk": 1.5}  # Reducidos de 1.5/1.2/2.0
         }
         return limits.get(profile.lower(), limits[UserProfile.ALUMNO])
+
 
 @dataclass
 class WorkloadType:
     """Define tipos de cargas de trabajo con diferentes patrones de uso"""
-    GENERAL = "general"               # Uso equilibrado de recursos
-    CPU_INTENSIVE = "cpu_intensive"   # Alto uso de CPU
+    GENERAL = "general"  # Uso equilibrado de recursos
+    CPU_INTENSIVE = "cpu_intensive"  # Alto uso de CPU
     MEMORY_INTENSIVE = "memory_intensive"  # Alto uso de memoria
-    IO_INTENSIVE = "io_intensive"     # Alto uso de disco/red
-    
+    IO_INTENSIVE = "io_intensive"  # Alto uso de disco/red
+
     @staticmethod
     def get_resource_weights(workload_type: str) -> Dict[str, float]:
         """
@@ -335,11 +273,12 @@ class VirtualMachine:
     desv_vcpu_used: float = 0.0
     desv_ram_used: float = 0.0
     desv_disk_used: float = 0.0
-    
+
     def __str__(self):
         return f"VM {self.id}: {self.name} - {self.flavor.name} (Utilidad: {self.utility:.2f})"
-    
-    def calcular_estadisticas_de_uso(self, profile: str) -> Dict[str, Tuple[float, float]]: # 3.4. Cálculo de Uso Promedio y Variabilidad de VM
+
+    def calcular_estadisticas_de_uso(self, profile: str) -> Dict[
+        str, Tuple[float, float]]:  # 3.4. Cálculo de Uso Promedio y Variabilidad de VM
         """
         Calcula el uso promedio (μ) y la desviación estándar (σ) de CPU, RAM y Disco
         según el perfil de usuario.
@@ -359,7 +298,6 @@ class VirtualMachine:
         mu_cpu = self.flavor['vcpus'] * factores_uso["vcpu"]
         mu_ram = self.flavor['ram'] * factores_uso["ram"]
         mu_disk = self.flavor['disk'] * factores_uso["disk"]
-        
 
         # Desviación estándar (σ) = μ * (β - 1)
         sigma_cpu = mu_cpu * (beta - 1)
@@ -368,10 +306,11 @@ class VirtualMachine:
 
         return {
             "vm_name": self.name,
-            "cpu": (round(mu_cpu, 4), round(sigma_cpu, 4)), #EVALUAR REDONDEO
+            "cpu": (round(mu_cpu, 4), round(sigma_cpu, 4)),  # EVALUAR REDONDEO
             "ram": (round(mu_ram, 4), round(sigma_ram, 4)),
             "disk": (round(mu_disk, 4), round(sigma_disk, 4))
         }
+
 
 @dataclass
 class PhysicalServer:
@@ -387,29 +326,30 @@ class PhysicalServer:
     used_vcpus: int = 0
     used_ram: int = 0
     used_disk: float = 0.0
-    availability_zone: int = 0 #ID de ZA
-    
+    availability_zone: int = 0  # ID de ZA
+
     @property
     def available_vcpus(self) -> int:
         """vCPUs disponibles sin sobreaprovisionamiento"""
         return self.total_vcpus - self.used_vcpus
-    
+
     @property
     def available_ram(self) -> int:
         """RAM disponible sin sobreaprovisionamiento (MB)"""
         return self.total_ram - self.used_ram
-    
+
     @property
     def available_disk(self) -> float:
         """Disco disponible sin sobreaprovisionamiento (GB)"""
         return self.total_disk - self.used_disk
-    
+
+
 class DatabaseManager:
     """
     Gestiona las conexiones y consultas a la base de datos MySQL
     """
     _pool = None
-    
+
     @classmethod
     def init_pool(cls):
         """Inicializa el pool de conexiones si no existe"""
@@ -420,14 +360,14 @@ class DatabaseManager:
             except Exception as e:
                 Logger.error(f"Error al inicializar el pool de conexiones: {str(e)}")
                 raise
-    
+
     @classmethod
     def get_connection(cls):
         """Obtiene una conexión del pool"""
         if cls._pool is None:
             cls.init_pool()
         return cls._pool.get_connection()
-    
+
     @classmethod
     def execute_query(cls, query, params=None, fetch=True):
         """Ejecuta una consulta SQL y devuelve los resultados"""
@@ -436,13 +376,13 @@ class DatabaseManager:
             connection = cls.get_connection()
             cursor = connection.cursor(dictionary=True)
             cursor.execute(query, params or ())
-            
+
             if fetch:
                 result = cursor.fetchall()
             else:
                 connection.commit()
                 result = cursor.rowcount
-                
+
             cursor.close()
             return result
         except Exception as e:
@@ -453,16 +393,16 @@ class DatabaseManager:
         finally:
             if connection:
                 connection.close()
-    
+
     @classmethod
     def get_active_flavors(cls):
         """Obtiene todos los flavors activos de la base de datos"""
         query = """
-            SELECT id, name, vcpus, ram, disk 
-            FROM flavor 
-            WHERE state = 'active'
-            ORDER BY id
-        """
+                SELECT id, name, vcpus, ram, disk
+                FROM flavor
+                WHERE state = 'active'
+                ORDER BY id \
+                """
         try:
             flavors = cls.execute_query(query)
             Logger.info(f"Se obtuvieron {len(flavors)} flavors activos desde la BD")
@@ -470,13 +410,10 @@ class DatabaseManager:
         except Exception as e:
             Logger.error(f"Error al obtener flavors activos: {str(e)}")
             return []
-    
+
     @classmethod
     def obtenerPhysicalServers(cls):
-        """
-        Esta función nos proporciona los servidores físicos (WORKERS) que se encuentren en DB
-        con métricas mejoradas de Prometheus
-        """
+        """ Esta función nos proporciona los servidores físicos (WORKERS) que se encuentren en DB"""
 
         query = """
                 SELECT id, \
@@ -493,12 +430,11 @@ class DatabaseManager:
                 """
         try:
             servers = cls.execute_query(query)
-            Logger.info(f"📋 {len(servers)} servidores físicos obtenidos desde la BD")
 
             # IMPORTANTE: USO CPU con prometheus
+            import random
             for server in servers:
                 instance = f"{server['ip']}:9100"  # Para detectar la instancia
-                Logger.subsection(f"Obteniendo métricas para {server['name']} ({instance})")
 
                 # Obtener RAM usada
                 ram_query = (
@@ -506,61 +442,45 @@ class DatabaseManager:
                     f'avg_over_time(node_memory_MemAvailable_bytes{{instance="{instance}"}}[1h])) / 1024 / 1024'
                 )
 
-                Logger.debug(f"Consultando RAM usada para {instance}")
                 ram_result = consultar_prometheus(ram_query)
                 if ram_result:
-                    ram_value = int(float(ram_result[0]['value'][1]))
-                    server['used_ram'] = ram_value
-                    Logger.success(f"✅ RAM usada: {ram_value} MB")
+                    server['used_ram'] = int(float(ram_result[0]['value'][1]))  # en MB
                 else:
-                    Logger.error(f"❌ No se pudo obtener RAM usada para {instance}")
-                    server['used_ram'] = 0
+                    Logger.error(f"No se pudo calcular la RAM usada promedio en la instancia: {server['ip']}")
 
                 # Obtener disco usado (root "/")
                 disk_query = (
                     f'(avg_over_time(node_filesystem_size_bytes{{instance="{instance}", mountpoint="/"}}[1h]) - '
                     f'avg_over_time(node_filesystem_free_bytes{{instance="{instance}", mountpoint="/"}}[1h])) / 1024 / 1024 / 1024'
                 )
-
-                Logger.debug(f"Consultando disco usado para {instance}")
                 disk_result = consultar_prometheus(disk_query)
                 if disk_result:
-                    disk_value = round(float(disk_result[0]['value'][1]), 1)
-                    server['used_disk'] = disk_value
-                    Logger.success(f"✅ Disco usado: {disk_value} GB")
+                    server['used_disk'] = round(float(disk_result[0]['value'][1]), 1)  # en GB
                 else:
-                    Logger.error(f"❌ No se pudo obtener disco usado para {instance}")
-                    server['used_disk'] = 0.0
+                    Logger.error(f"No se pudo calcular el DISCO usado promedio en la instancia: {server['ip']}")
 
-                # Obtener CPU usada (aproximado como # cores usados)
+                # Obtener CPU usada (aproximado como # cores usados). Primero se calcula el porcentaje de tiempo que está en "idle" y luego se calcula el complemento
                 cpu_query = (
                     f'count(count by (cpu) (node_cpu_seconds_total{{instance="{instance}"}})) * '
                     f'(1 - avg(rate(node_cpu_seconds_total{{instance="{instance}", mode="idle"}}[1m])))'
                 )
 
-                Logger.debug(f"Consultando CPU usado para {instance}")
                 cpu_result = consultar_prometheus(cpu_query)
                 if cpu_result:
-                    cpu_value = round(float(cpu_result[0]['value'][1]), 1)
-                    server['used_vcpus'] = cpu_value
-                    Logger.success(f"✅ CPU usado: {cpu_value} vCPUs")
+                    server['used_vcpus'] = round(float(cpu_result[0]['value'][1]), 1)
                 else:
-                    Logger.error(f"❌ No se pudo obtener CPU usado para {instance}")
-                    server['used_vcpus'] = 0.0
+                    Logger.error(f"No se pudo calcular CPU usado promedio en la instancia: {server['ip']}")
 
-                Logger.info(f"📊 Resumen de métricas para {server['name']}:")
-                Logger.info(f"   RAM: {server['used_ram']}/{server['total_ram']} MB")
-                Logger.info(f"   CPU: {server['used_vcpus']}/{server['total_vcpus']} vCPUs")
-                Logger.info(f"   Disco: {server['used_disk']}/{server['total_disk']} GB")
-
-            Logger.success(f"✅ Métricas obtenidas para todos los servidores")
+                Logger.section(f"===================== {server['name']} =====================")
+                Logger.info(f"RAM USADA en promedio (1 hora): {ram_result} MB")
+                Logger.info(f"DISCO USADO en promedio (1 hora): {disk_result} GB")
+                Logger.info(f"CPU USADO en promedio (1 hora): {cpu_result}")
+            Logger.info(f"Se obtuvieron {len(servers)} servidores físicos desde la BD")
             return servers
-
         except Exception as e:
-            Logger.error(f"❌ Error al obtener servidores físicos: {str(e)}")
-            Logger.debug(f"Traceback: {traceback.format_exc()}")
+            Logger.error(f"Error al obtener servidores físicos: {str(e)}")
             return []
-    
+
     @classmethod
     def calcular_capacidad_asignada_con_modelo_compuesto(cls, servidor_id: int) -> Dict[str, float]:
         """
@@ -570,22 +490,22 @@ class DatabaseManager:
         - Enfoque independiente entre slices (σ_total = sqrt(suma(σ_slice^2)), μ_total = suma(μ_slice))
         """
         query = """
-            SELECT slice,
-                SUM(COALESCE(mu_vcpu_used, 0)) AS mu_cpu_slice,
-                SUM(COALESCE(mu_ram_used, 0)) AS mu_ram_slice,
-                SUM(COALESCE(mu_disk_used, 0)) AS mu_disk_slice,
-                SUM(COALESCE(desv_vcpu_used, 0)) AS sigma_cpu_slice,
-                SUM(COALESCE(desv_ram_used, 0)) AS sigma_ram_slice,
-                SUM(COALESCE(desv_disk_used, 0)) AS sigma_disk_slice
-            FROM virtual_machine
-            WHERE physical_server = %s
-            AND status IN ('running', 'preparing')
-            GROUP BY slice;
-        """
+                SELECT slice,
+                       SUM(COALESCE(mu_vcpu_used, 0))   AS mu_cpu_slice,
+                       SUM(COALESCE(mu_ram_used, 0))    AS mu_ram_slice,
+                       SUM(COALESCE(mu_disk_used, 0))   AS mu_disk_slice,
+                       SUM(COALESCE(desv_vcpu_used, 0)) AS sigma_cpu_slice,
+                       SUM(COALESCE(desv_ram_used, 0))  AS sigma_ram_slice,
+                       SUM(COALESCE(desv_disk_used, 0)) AS sigma_disk_slice
+                FROM virtual_machine
+                WHERE physical_server = %s
+                  AND status IN ('running', 'preparing')
+                GROUP BY slice; \
+                """
 
         try:
             resultados = cls.execute_query(query, (servidor_id,))
-            #Si no hay resultados significa que el server no tiene instancia alguna
+            # Si no hay resultados significa que el server no tiene instancia alguna
             if not resultados:
                 return {
                     "mu_cpu": 0.0, "sigma_cpu": 0.0,
@@ -632,9 +552,6 @@ class DatabaseManager:
             }
 
 
-    
-    
-
 @dataclass
 class Slice:
     """Representa un conjunto de VMs relacionadas a desplegar como unidad"""
@@ -643,8 +560,8 @@ class Slice:
     vms: List[VirtualMachine]
     user_profile: str = UserProfile.ALUMNO
     workload_type: str = WorkloadType.GENERAL
-    
-    def calcular_demanda_efectica_slice_correlacionado(self) -> Dict[str, float]: # 3.5.1 Enfoque Correlacionado
+
+    def calcular_demanda_efectica_slice_correlacionado(self) -> Dict[str, float]:  # 3.5.1 Enfoque Correlacionado
         """
         Calcula la demanda esperada del slice usando enfoque correlacionado de VMs
         (media + desviación estándar) para CPU, RAM y Disco.
@@ -652,7 +569,7 @@ class Slice:
         """
         suma_mu = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
         suma_sigma = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
-        lista_stats_vms = [] #Lista para capturar los stats de cada VM (media de uso y desv estándar)
+        lista_stats_vms = []  # Lista para capturar los stats de cada VM (media de uso y desv estándar)
 
         for vm in self.vms:
             stats = vm.calcular_estadisticas_de_uso(self.user_profile)
@@ -668,24 +585,24 @@ class Slice:
             mu_total = suma_mu[recurso]
             sigma_total = math.sqrt(suma_sigma[recurso])
             demanda_efectiva = mu_total + sigma_total
-            resultados[recurso] = round(demanda_efectiva, 4) # EVALUAR REDONDEO
-            
-        self.lista_stats_vms = lista_stats_vms #GUARDA COMO ATRIBUTO DE INSTANCIA
-        return resultados, lista_stats_vms #Array de capacidad efectiva por recurso
-    
+            resultados[recurso] = round(demanda_efectiva, 4)  # EVALUAR REDONDEO
+
+        self.lista_stats_vms = lista_stats_vms  # GUARDA COMO ATRIBUTO DE INSTANCIA
+        return resultados, lista_stats_vms  # Array de capacidad efectiva por recurso
+
     from typing import Tuple, Optional
-    
+
     def capacidades_function(self, recurso, servidor: PhysicalServer):
         """
             Función que calcula las capacidades de los servidores
         """
-        #FALTA CORREGIR LA CAPACIDAD ASIGNADA
+        # FALTA CORREGIR LA CAPACIDAD ASIGNADA
         capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(servidor.id)
-        if(recurso == "vcpu"):
+        if (recurso == "vcpu"):
             capacidad_usada = servidor.used_vcpus
             capacidad_total = servidor.total_vcpus
             capacidad_asignada = capacidades_asignadas["mu_cpu"] + capacidades_asignadas["sigma_cpu"]
-        elif(recurso=="ram"):
+        elif (recurso == "ram"):
             capacidad_usada = servidor.used_ram
             capacidad_total = servidor.total_ram
             capacidad_asignada = capacidades_asignadas["mu_ram"] + capacidades_asignadas["sigma_ram"]
@@ -694,16 +611,16 @@ class Slice:
             capacidad_total = servidor.total_disk
             capacidad_asignada = capacidades_asignadas["mu_disk"] + capacidades_asignadas["sigma_disk"]
         return capacidad_total, capacidad_usada, capacidad_asignada
-    
+
     def obtener_demanda_slice(self, r: str, demanda_efectiva: Dict[str, float]):
         if r == "vcpu":
-            demanda_slice = demanda_efectiva["cpu"] #demanda en cpu del slice
+            demanda_slice = demanda_efectiva["cpu"]  # demanda en cpu del slice
         else:
-            demanda_slice = demanda_efectiva[r] #demanda en ram o disk del slice
+            demanda_slice = demanda_efectiva[r]  # demanda en ram o disk del slice
         return demanda_slice
-        
-    
-    def cabe_en_servidor(self, servidor: PhysicalServer, alfa: float = 0.5) -> Tuple[bool, Optional[str], Dict[str, float]]: #5.2
+
+    def cabe_en_servidor(self, servidor: PhysicalServer, alfa: float = 0.5) -> Tuple[
+        bool, Optional[str], Dict[str, float]]:  # 5.2
         """
         Verifica si este slice puede colocarse en un servidor físico dado,
         usando el modelo estadístico independiente con sobreaprovisionamiento SLA.
@@ -719,7 +636,7 @@ class Slice:
             - dict: márgenes disponibles por recurso
         """
         congestion_dicc = {"congestion_cpu": 0.0, "congestion_ram": 0.0, "congestion_disk": 0.0}
-        
+
         # 1. Obtener demanda efectiva (μ + σ) y lista_stats_vms para guardar en db si se instancia el slice
         demanda_efectiva, lista_stats_vms = self.calcular_demanda_efectica_slice_correlacionado()
         Logger.info(f"Demanda efectiva del slice: {demanda_efectiva}")
@@ -730,44 +647,47 @@ class Slice:
         # 3. Evaluar para cada recurso
         margenes = {}
         for r in ["vcpu", "ram", "disk"]:
-            #Capacidades calculadas del server
+            # Capacidades calculadas del server
             capacidad_total, capacidad_usada, capacidad_asignada = self.capacidades_function(r, servidor)
             Logger.info(f"[{r}] Total: {capacidad_total}, Usada: {capacidad_usada}, Asignada: {capacidad_asignada}")
-            #Capacidad disponible del server
-            capacidad_disponible_server = lambdas[r]*(capacidad_total-alfa*capacidad_asignada-(1-alfa)*capacidad_usada)
-            #Demanda del slice en base al recurso
+            # Capacidad disponible del server
+            capacidad_disponible_server = lambdas[r] * (
+                        capacidad_total - alfa * capacidad_asignada - (1 - alfa) * capacidad_usada)
+            # Demanda del slice en base al recurso
             demanda_slice = self.obtener_demanda_slice(r, demanda_efectiva)
-            #margen del recurso analizado (cpu, ram, disk)
-            margen = round(capacidad_disponible_server - demanda_slice, 4) #margen entre demanda la capacidad disponible del server y la demanda del slice
+            # margen del recurso analizado (cpu, ram, disk)
+            margen = round(capacidad_disponible_server - demanda_slice,
+                           4)  # margen entre demanda la capacidad disponible del server y la demanda del slice
             if r == "vcpu":
                 margenes["cpu"] = margen
             else:
                 margenes[r] = margen
-            #Verificamos restricción
+            # Verificamos restricción
             if demanda_slice > capacidad_disponible_server:
-                return False, r, margenes, None # No cabe
-            
-            #Calculamos congestión del recurso
-            congestion = (lambdas[r]*(alfa*capacidad_asignada+(1-alfa)*capacidad_usada) + demanda_slice)/(capacidad_total*lambdas[r])
+                return False, r, margenes, None  # No cabe
+
+            # Calculamos congestión del recurso
+            congestion = (lambdas[r] * (alfa * capacidad_asignada + (1 - alfa) * capacidad_usada) + demanda_slice) / (
+                        capacidad_total * lambdas[r])
             if r == "vcpu":
                 congestion_dicc["congestion_cpu"] = round(congestion, 4)
             elif r == "ram":
                 congestion_dicc["congestion_ram"] = round(congestion, 4)
             else:
                 congestion_dicc["congestion_disk"] = round(congestion, 4)
-            
-        return True, None, margenes, congestion_dicc # Cabe
 
-    
-    def calcular_congestion_y_Q(self, congestion_dicc: Dict[str, float]) -> Tuple[float, float]: # 6.2.1,  6.3.2, 6.4.1 
-        
+        return True, None, margenes, congestion_dicc  # Cabe
+
+    def calcular_congestion_y_Q(self, congestion_dicc: Dict[str, float]) -> Tuple[
+        float, float]:  # 6.2.1,  6.3.2, 6.4.1
+
         # 1. Obtener pesos del tipo de workload
         pesos = WorkloadType.get_resource_weights(self.workload_type)
         # 2. Congestión ponderada
         rho_weighted = (
-            pesos["vcpu"] * congestion_dicc["congestion_cpu"] +
-            pesos["ram"] * congestion_dicc["congestion_ram"] +
-            pesos["disk"] * congestion_dicc["congestion_disk"]
+                pesos["vcpu"] * congestion_dicc["congestion_cpu"] +
+                pesos["ram"] * congestion_dicc["congestion_ram"] +
+                pesos["disk"] * congestion_dicc["congestion_disk"]
         )
         print(f"rho_weighted: {rho_weighted}")
         # 3. Cálculo de Q en base a congestión CPU (sigmoide)
@@ -776,7 +696,7 @@ class Slice:
         rho_cpu = congestion_dicc["congestion_cpu"]
         Q = 1 / (1 + math.exp(-a * (rho_cpu - b)))
         return round(rho_weighted, 4), round(Q, 4)
-    
+
     def calcular_score_ponderado(self, servidor: PhysicalServer) -> float:
         """
         Calcula el score ponderado de asignación del slice en un servidor físico.
@@ -785,9 +705,9 @@ class Slice:
         Retorna:
         - score final ponderado (float)
         """
-        
+
         # 1. Verificar si cabe (restricción)
-        cabe, _, margenes, congestion_dicc = self.cabe_en_servidor(servidor, alfa=0.5) #Se setea alfa en 0.5
+        cabe, _, margenes, congestion_dicc = self.cabe_en_servidor(servidor, alfa=0.5)  # Se setea alfa en 0.5
         if not cabe:
             Logger.error("No cabe")
             return 0.0
@@ -798,21 +718,23 @@ class Slice:
         Logger.info(f"rho: {rho_weighted}")
         Logger.info(f"Q: {Q}")
         # 3. Factores individuales
-        f_cong = 1 - rho_weighted #factor de congestión
-        f_queue = 1 - Q #factor de cola
+        f_cong = 1 - rho_weighted  # factor de congestión
+        f_queue = 1 - Q  # factor de cola
         # 4. Score ponderado final
         score = 0.6 * f_cong + 0.4 * f_queue
         return round(score, 4)
 
-    def score_servidores(self, servidores: List[PhysicalServer]) -> Tuple[Optional[PhysicalServer], float]:
+    def score_servidores(self, servidores: List[PhysicalServer]) -> List[Tuple[PhysicalServer, float]]:
         """
-        Selecciona el mejor servidor (máximo score ponderado) para un slice.
+        Evalúa todos los servidores y devuelve una lista de tuplas (servidor, score).
+
         Parámetros:
-        - servidores: lista de servidores con claves 'vcpu', 'used_vcpus', etc.
+        - servidores: lista de servidores físicos
+
         Retorna:
-        - Lista de tuplas [tupla:(mejor_servidor_dict, score)]
+        - Lista de tuplas (servidor, score)
         """
-        lista_tupla_servidor_score = [] #Lista de tuplas (server,score)
+        lista_tupla_servidor_score = []
 
         for server in servidores:
             # Calculamos el score del slice en el server
@@ -820,6 +742,7 @@ class Slice:
             Logger.info(f"{server.name}, score: {score}")
             tupla_server_score = (server, score)
             lista_tupla_servidor_score.append(tupla_server_score)
+
         return lista_tupla_servidor_score
 
     def get_resource_weights(self) -> Dict[str, float]:
@@ -1056,23 +979,23 @@ class Slice:
             "message": f"FASE 2 falló: {razon}",
             "razon": razon
         }
-    
+
 
 # ===================== UTILIDADES =====================
 class Logger:
     """Clase para manejar el formato y presentación de logs del sistema"""
 
     # Colores ANSI
-    HEADER = '\033[95m'    # Morado
-    BLUE = '\033[94m'      # Azul
-    GREEN = '\033[92m'     # Verde
-    YELLOW = '\033[93m'    # Amarillo
-    RED = '\033[91m'       # Rojo
-    CYAN = '\033[96m'      # Cyan
-    WHITE = '\033[97m'     # Blanco brillante
-    ENDC = '\033[0m'       # Reset color
-    BOLD = '\033[1m'       # Negrita
-    DIM = '\033[2m'        # Tenue
+    HEADER = '\033[95m'  # Morado
+    BLUE = '\033[94m'  # Azul
+    GREEN = '\033[92m'  # Verde
+    YELLOW = '\033[93m'  # Amarillo
+    RED = '\033[91m'  # Rojo
+    CYAN = '\033[96m'  # Cyan
+    WHITE = '\033[97m'  # Blanco brillante
+    ENDC = '\033[0m'  # Reset color
+    BOLD = '\033[1m'  # Negrita
+    DIM = '\033[2m'  # Tenue
 
     @staticmethod
     def _get_timestamp():
@@ -1146,28 +1069,29 @@ class Logger:
         timestamp = Logger._get_timestamp()
         print(f"{Logger.RED}[{Logger.DIM}{timestamp}{Logger.RED}] ⨯ {message}{Logger.ENDC}")
 
+
 # ===================== SUBMÓDULOS =====================
 
 class DataManager:
     """
     Gestiona la conversión entre diferentes formatos de datos para VM placement
     """
-    
+
     @staticmethod
     def load_from_database() -> Tuple[List[VirtualMachine], List[PhysicalServer]]:
         """
         Carga los datos desde la base de datos
         Nota: Solo carga flavors y physical servers, no VMs
-        
+
         Returns:
             Tuple con listas de VMs (vacía) y servidores
         """
         try:
             Logger.section("Cargando datos desde la base de datos")
-            
+
             # Obtener flavors activos desde la BD
             db_flavors = DatabaseManager.get_active_flavors()
-            
+
             # Convertir flavors a objetos
             flavors = {}
             for flavor_data in db_flavors:
@@ -1180,7 +1104,7 @@ class DataManager:
                 )
                 flavors[flavor.id] = flavor
                 Logger.debug(f"Flavor cargado: {flavor}")
-            
+
             # Obtener servidores físicos desde la BD
             db_servers = DatabaseManager.obtenerPhysicalServers()
             # Convertir servidores a objetos
@@ -1189,48 +1113,49 @@ class DataManager:
                 server = PhysicalServer(
                     id=server_data['id'],
                     name=server_data['name'],
-                    ip = server_data['ip'],
+                    ip=server_data['ip'],
                     total_vcpus=server_data['total_vcpus'],
                     total_ram=server_data['total_ram'],
                     total_disk=float(server_data['total_disk']),
-                    used_vcpus=server_data['used_vcpus'], # Por defecto en db es cero ya que se saca de Prometheus
+                    used_vcpus=server_data['used_vcpus'],  # Por defecto en db es cero ya que se saca de Prometheus
                     used_ram=server_data['used_ram'],
                     used_disk=float(server_data['used_disk']),
-                    availability_zone=server_data['availability_zone'] #Zona de Disponibilidad (ID)
+                    availability_zone=server_data['availability_zone']  # Zona de Disponibilidad (ID)
                 )
-                
+
                 servers.append(server)
                 Logger.debug(f"Servidor físico cargado: {server}")
-            
+
             # No estamos cargando VMs - lista vacía
             vms = []
-            
-            Logger.success(f"Datos cargados correctamente desde la BD: {len(flavors)} flavors y {len(servers)} servidores")
+
+            Logger.success(
+                f"Datos cargados correctamente desde la BD: {len(flavors)} flavors y {len(servers)} servidores")
             return vms, servers
-            
+
         except Exception as e:
             Logger.error(f"Error al cargar los datos desde la base de datos: {str(e)}")
             return [], []
-    
+
     @staticmethod
     def generate_test_data(num_vms=10, num_servers=3, seed=None) -> str:
         """
         Genera datos de prueba aleatorios
-        
+
         Args:
             num_vms: Número de VMs a generar
             num_servers: Número de servidores a generar (0 para no generar)
             seed: Semilla para reproducibilidad
-                
+
         Returns:
             String JSON con los datos generados
         """
         Logger.section("GENERANDO DATOS DE PRUEBA")
-        
+
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
-        
+
         # Obtener flavors desde la base de datos
         try:
             db_flavors = DatabaseManager.get_active_flavors()
@@ -1246,10 +1171,10 @@ class DataManager:
                     {"name": "large", "vcpus": 8, "ram": 8192, "disk": 80.0},
                     {"name": "xlarge", "vcpus": 16, "ram": 16384, "disk": 160.0}
                 ]
-                
+
                 for i, template in enumerate(flavor_templates):
                     flavor = {
-                        "id": i+1,
+                        "id": i + 1,
                         "name": template["name"],
                         "vcpus": template["vcpus"],
                         "ram": template["ram"],
@@ -1281,17 +1206,17 @@ class DataManager:
                 {"name": "large", "vcpus": 8, "ram": 8192, "disk": 80.0},
                 {"name": "xlarge", "vcpus": 16, "ram": 16384, "disk": 160.0}
             ]
-            
+
             for i, template in enumerate(flavor_templates):
                 flavor = {
-                    "id": i+1,
+                    "id": i + 1,
                     "name": template["name"],
                     "vcpus": template["vcpus"],
                     "ram": template["ram"],
                     "disk": template["disk"]
                 }
                 flavors.append(flavor)
-        
+
         # Generar servidores físicos si num_servers > 0
         physical_servers = []
         if num_servers > 0:
@@ -1302,15 +1227,15 @@ class DataManager:
                     total_vcpus = random.randint(32, 64)
                     total_ram = random.randint(32768, 65536)
                     total_disk = round(random.uniform(500, 1000), 1)
-                    
+
                     # Asegurar que used no excede el 60% del total
                     used_vcpus = random.randint(1, int(total_vcpus * 0.6))
                     used_ram = random.randint(1024, int(total_ram * 0.6))
                     used_disk = round(random.uniform(10, total_disk * 0.6), 1)
-                    
+
                     server = {
-                        "id": i+1,
-                        "name": f"Worker-{i+1}",
+                        "id": i + 1,
+                        "name": f"Worker-{i + 1}",
                         "total_vcpus": total_vcpus,
                         "total_ram": total_ram,
                         "total_disk": total_disk,
@@ -1323,15 +1248,15 @@ class DataManager:
                     total_vcpus = random.randint(16, 32)
                     total_ram = random.randint(65536, 131072)
                     total_disk = round(random.uniform(500, 1000), 1)
-                    
+
                     # Asegurar que used no excede el 60% del total
                     used_vcpus = random.randint(1, int(total_vcpus * 0.6))
                     used_ram = random.randint(2048, int(total_ram * 0.6))
                     used_disk = round(random.uniform(10, total_disk * 0.6), 1)
-                    
+
                     server = {
-                        "id": i+1,
-                        "name": f"Worker-{i+1}",
+                        "id": i + 1,
+                        "name": f"Worker-{i + 1}",
                         "total_vcpus": total_vcpus,
                         "total_ram": total_ram,
                         "total_disk": total_disk,
@@ -1344,15 +1269,15 @@ class DataManager:
                     total_vcpus = random.randint(16, 32)
                     total_ram = random.randint(32768, 65536)
                     total_disk = round(random.uniform(1000, 2000), 1)
-                    
+
                     # Asegurar que used no excede el 60% del total
                     used_vcpus = random.randint(1, int(total_vcpus * 0.6))
                     used_ram = random.randint(1024, int(total_ram * 0.6))
                     used_disk = round(random.uniform(20, total_disk * 0.6), 1)
-                    
+
                     server = {
-                        "id": i+1,
-                        "name": f"Worker-{i+1}",
+                        "id": i + 1,
+                        "name": f"Worker-{i + 1}",
                         "total_vcpus": total_vcpus,
                         "total_ram": total_ram,
                         "total_disk": total_disk,
@@ -1361,32 +1286,34 @@ class DataManager:
                         "used_disk": used_disk
                     }
                 physical_servers.append(server)
-        
+
         # Generar VMs usando los flavors obtenidos de la BD
         virtual_machines = []
         vm_name_prefixes = ["VM"]
         for i in range(num_vms):
             if flavors:
-                flavor_id = flavors[random.randint(0, len(flavors)-1)]["id"]
+                flavor_id = flavors[random.randint(0, len(flavors) - 1)]["id"]
                 prefix = random.choice(vm_name_prefixes)
-                
+
                 vm = {
-                    "id": i+1,
-                    "name": f"{prefix}-{i+1}",
+                    "id": i + 1,
+                    "name": f"{prefix}-{i + 1}",
                     "flavor_id": flavor_id
                 }
                 virtual_machines.append(vm)
-        
+
         # Crear el objeto JSON completo
         test_data = {
             "flavors": flavors,
             "physical_servers": physical_servers,
             "virtual_machines": virtual_machines
         }
-        
-        Logger.success(f"Generados {len(virtual_machines)} VMs, {len(flavors)} flavors y {len(physical_servers)} servidores")
-        
+
+        Logger.success(
+            f"Generados {len(virtual_machines)} VMs, {len(flavors)} flavors y {len(physical_servers)} servidores")
+
         return json.dumps(test_data, indent=2)
+
 
 # ===================== ENDPOINTS DE LA API =====================
 @app.route('/health', methods=['GET'])
@@ -1400,31 +1327,56 @@ def health_check():
         "timestamp": datetime.now().isoformat()
     }), 200
 
+
 @app.route('/slice_placement_v3', methods=['POST'])
 def slice_placement_v3():
     try:
+        Logger.major_section("API: VM PLACEMENT REQUEST")
         data = request.get_json()
-        # 1. Validar entrada mínima, se agrega ZA: LOW TIER, PREMIUM, VIP, parámetros de slice básicos: ID y NAME, USUARIO
-        required_fields = ["slice_id", "slice_name", "user_profile", "availability_zone", "workload_type", "virtual_machines"]
+
+        # 1. Validar entrada
+        required_fields = ["slice_id", "slice_name", "user_profile", "availability_zone", "workload_type",
+                           "virtual_machines"]
         if not all(field in data for field in required_fields):
-            return jsonify({"status": "error", "message": "Faltan campos requeridos"}), 400
+            return jsonify({
+                "status": "fail",
+                "message": "Faltan campos requeridos",
+                "slice_id": data.get("slice_id"),
+                "slice_name": data.get("slice_name"),
+                "servers_info": []
+            }), 400
+
         # 2. Crear VMs
         vms = []
         for vm_data in data["virtual_machines"]:
             if "id" not in vm_data or "name" not in vm_data or "flavor_id" not in vm_data:
-                return jsonify({"status": "error", "message": "Formato de VM incorrecto"}), 400
-            # Buscar el flavor correspondiente (esto debería venir de BD en entorno real)
-            flavor = Flavor.get_by_id(vm_data["flavor_id"])  # Debes tener esta función implementada
+                return jsonify({
+                    "status": "fail",
+                    "message": "Formato de VM incorrecto",
+                    "slice_id": data.get("slice_id"),
+                    "slice_name": data.get("slice_name"),
+                    "servers_info": []
+                }), 400
+
+            # Buscar el flavor correspondiente
+            flavor = Flavor.get_by_id(vm_data["flavor_id"])
             if not flavor:
-                return jsonify({"status": "error", "message": f"Flavor ID {vm_data['flavor_id']} no encontrado"}), 404
+                return jsonify({
+                    "status": "fail",
+                    "message": f"Flavor ID {vm_data['flavor_id']} no encontrado",
+                    "slice_id": data.get("slice_id"),
+                    "slice_name": data.get("slice_name"),
+                    "servers_info": []
+                }), 400
 
             vm = VirtualMachine(id=vm_data["id"], name=vm_data["name"], flavor=flavor)
             vms.append(vm)
+
         # 3. Construir el Slice
         slice_obj = Slice(
             id=data["slice_id"],
             name=data["slice_name"],
-            vms=vms, #Lista de VMs
+            vms=vms,
             user_profile=data["user_profile"].lower(),
             workload_type=data["workload_type"].lower()
         )
@@ -1432,58 +1384,201 @@ def slice_placement_v3():
         # 4. Obtener servidores físicos
         _, servidores = DataManager.load_from_database()
         if not servidores:
-            return jsonify({"status": "error", "message": "No hay servidores disponibles"}), 500
-        print(f"TODOS LOS SERVIDORES: {servidores}")
-
-        # 4.1 Filtrar servidores por ZA
-        zona_requerida_id  = int(data["availability_zone"]) #Se manda en base al ID de la ZA
-        Logger.section(f"Filtrando servidores en la zona: {zona_requerida_id}")
-        servidores_zona_requerida = [srv for srv in servidores if srv.availability_zone == zona_requerida_id]
-        if not servidores_zona_requerida:
-            return jsonify({"status": "fail", "message": f"No hay servidores disponibles en la zona ID {zona_requerida_id}"}), 200
-        # 5. Resolver placement
-        lista_tupla_servidor_score = slice_obj.score_servidores(servidores_zona_requerida) #Se evalúan solo los servidores_zona_requerida
-        for tupla_servidor_score in lista_tupla_servidor_score:
-            print(f"Servidor: {tupla_servidor_score[0].name}, score: {tupla_servidor_score[1]}")
-
-        # Validar si la lista está vacía o si todos los scores son 0.0
-        if not lista_tupla_servidor_score or all(score == 0.0 for _, score in lista_tupla_servidor_score):
-            Logger.failed("Ningún servidor puede alojar el slice")
-            #Se debe aplicar lógica de FASE 2, se debe sacar la VM más pequeña (mayor probabilidad de instanciarse en otro server)
-            #y luego generar el "mini-slice" con esa vm menos e intentar el score en los servers según su ZA y que la otra VM
-            #se instancie en otro server, considerándola como "mini-slice" y haciendo de score para el caso de ZA=PREMIUM
-            """Logger.warning("Ningún servidor puede alojar el slice. Iniciando FASE 2...")
-            resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores)
-
-            if resultado_fase2["status"] == "success":
-                return jsonify(resultado_fase2), 200
-            else:
-                return jsonify(resultado_fase2), 200"""
-
-            return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
-        else:
-            #Escoger best_server y best_score
-            best_server, best_score = max(lista_tupla_servidor_score, key=lambda x: x[1])
-            #Se debe actualizar Base de datos con los mu y sigma calculados de cada VM instanciada
-            stats_por_vm = slice_obj.lista_stats_vms
-            Logger.section("Estadísticas de uso por VM (μ y σ)")
-            print(stats_por_vm)
-            #Las stats también se las pasa al Driver correspondiente
-            #Json Response
             return jsonify({
-                "status": "success",
+                "status": "fail",
+                "message": "No hay servidores disponibles",
                 "slice_id": data["slice_id"],
                 "slice_name": data["slice_name"],
-                "asignado_a": best_server.name,
-                "server_id": best_server.id,
-                "server_ip": best_server.ip,
-                "score": best_score,
-                "stats_vms": stats_por_vm
+                "servers_info": []
+            }), 500
+
+        # 4.1 Filtrar servidores por zona de disponibilidad
+        zona_requerida_id = int(data["availability_zone"])
+        Logger.section(f"Filtrando servidores en la zona: {zona_requerida_id}")
+        servidores_zona_requerida = [srv for srv in servidores if srv.availability_zone == zona_requerida_id]
+
+        if not servidores_zona_requerida:
+            return jsonify({
+                "status": "fail",
+                "message": f"No hay servidores disponibles en la zona ID {zona_requerida_id}",
+                "slice_id": data["slice_id"],
+                "slice_name": data["slice_name"],
+                "availability_zone": zona_requerida_id,
+                "servers_info": []
             }), 200
 
+        # 5. FASE 1: Intentar colocar slice completo en un servidor
+        Logger.section("FASE 1: Intentando colocación en servidor único")
+        lista_tupla_servidor_score = slice_obj.score_servidores(servidores_zona_requerida)
+
+        # Encontrar el mejor servidor
+        best_server = None
+        best_score = 0.0
+
+        for servidor, score in lista_tupla_servidor_score:
+            Logger.debug(f"Servidor: {servidor.name}, score: {score}")
+            if score > best_score:
+                best_score = score
+                best_server = servidor
+
+        # 6. Generar respuesta según resultado de FASE 1
+        if best_server and best_score > 0:
+            Logger.success(f"FASE 1 exitosa: Slice asignado a {best_server.name}")
+
+            # Obtener estadísticas de las VMs
+            stats_por_vm = slice_obj.lista_stats_vms
+
+            # Obtener capacidades del servidor
+            capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(best_server.id)
+
+            # Formato de respuesta exitosa
+            vms_response = []
+            for i, vm in enumerate(slice_obj.vms):
+                vm_stats = stats_por_vm[i]
+                vms_response.append({
+                    "vm_id": vm.id,
+                    "vm_name": vm.name,
+                    "mu_vcpu_used": vm_stats["cpu"][0],
+                    "mu_ram_used": vm_stats["ram"][0],
+                    "mu_disk_used": vm_stats["disk"][0],
+                    "desv_vcpu_used": vm_stats["cpu"][1],
+                    "desv_ram_used": vm_stats["ram"][1],
+                    "desv_disk_used": vm_stats["disk"][1]
+                })
+
+            return jsonify({
+                "status": "success",
+                "assignments": [
+                    {
+                        "server_id": best_server.id,
+                        "server_name": best_server.name,
+                        "server_ip": best_server.ip,
+                        "current_usage": {
+                            "vcpus": best_server.used_vcpus,
+                            "ram": best_server.used_ram,
+                            "disk": best_server.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        },
+                        "vms": vms_response
+                    }
+                ]
+            }), 200
+
+        else:
+            Logger.warning("FASE 1 falló: Intentando FASE 2...")
+
+            # FASE 2: Distribución en múltiples servidores
+            resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores_zona_requerida)
+
+            if resultado_fase2["status"] == "success":
+                # Convertir resultado de FASE 2 al formato unificado
+                assignments = []
+                for asignacion in resultado_fase2["asignaciones"]:
+                    servidor_id = asignacion["server_id"]
+                    servidor = next(s for s in servidores_zona_requerida if s.id == servidor_id)
+
+                    # Obtener capacidades del servidor
+                    capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(
+                        servidor.id)
+
+                    # Preparar VMs response
+                    vms_response = []
+                    for vm_info in asignacion["vms"]:
+                        # Encontrar la VM original para obtener sus stats
+                        vm_original = next(vm for vm in slice_obj.vms if vm.id == vm_info["id"])
+                        vm_stats = vm_original.calcular_estadisticas_de_uso(slice_obj.user_profile)
+
+                        vms_response.append({
+                            "vm_id": vm_info["id"],
+                            "vm_name": vm_info["name"],
+                            "mu_vcpu_used": vm_stats["cpu"][0],
+                            "mu_ram_used": vm_stats["ram"][0],
+                            "mu_disk_used": vm_stats["disk"][0],
+                            "desv_vcpu_used": vm_stats["cpu"][1],
+                            "desv_ram_used": vm_stats["ram"][1],
+                            "desv_disk_used": vm_stats["disk"][1]
+                        })
+
+                    assignments.append({
+                        "server_id": servidor.id,
+                        "server_name": servidor.name,
+                        "server_ip": servidor.ip,
+                        "current_usage": {
+                            "vcpus": servidor.used_vcpus,
+                            "ram": servidor.used_ram,
+                            "disk": servidor.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        },
+                        "vms": vms_response
+                    })
+
+                return jsonify({
+                    "status": "success",
+                    "assignments": assignments
+                }), 200
+
+            else:
+                # Tanto FASE 1 como FASE 2 fallaron
+                Logger.error("Ambas fases fallaron")
+
+                # Obtener información de todos los servidores evaluados
+                servers_info = []
+                for servidor in servidores_zona_requerida:
+                    capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(
+                        servidor.id)
+                    servers_info.append({
+                        "server_id": servidor.id,
+                        "server_name": servidor.name,
+                        "server_ip": servidor.ip,
+                        "current_usage": {
+                            "vcpus": servidor.used_vcpus,
+                            "ram": servidor.used_ram,
+                            "disk": servidor.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        }
+                    })
+
+                return jsonify({
+                    "status": "fail",
+                    "message": "No se puede colocar el slice en ningún servidor disponible en la zona de disponibilidad",
+                    "slice_id": data["slice_id"],
+                    "slice_name": data["slice_name"],
+                    "availability_zone": zona_requerida_id,
+                    "servers_info": servers_info
+                }), 200
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        Logger.error(f"Error en VM Placement: {str(e)}")
+        Logger.debug(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "status": "fail",
+            "message": f"Error interno: {str(e)}",
+            "slice_id": data.get("slice_id") if 'data' in locals() else None,
+            "slice_name": data.get("slice_name") if 'data' in locals() else None,
+            "servers_info": []
+        }), 500
+
 
 @app.route('/test-data', methods=['GET'])
 def get_test_data():
@@ -1493,20 +1588,21 @@ def get_test_data():
     try:
         # Generar datos de prueba con flavors de la BD
         num_vms = random.randint(3, 8)
-        
+
         # Generar datos base
         test_data_json = DataManager.generate_test_data(num_vms=num_vms, num_servers=0, seed=None)
         test_data = json.loads(test_data_json)
-        
+
         # Seleccionar perfil de usuario y workload aleatorios
         user_profiles = [UserProfile.ALUMNO, UserProfile.JP, UserProfile.MAESTRO, UserProfile.INVESTIGADOR]
-        workload_types = [WorkloadType.GENERAL, WorkloadType.CPU_INTENSIVE, WorkloadType.MEMORY_INTENSIVE, WorkloadType.IO_INTENSIVE]
-        
+        workload_types = [WorkloadType.GENERAL, WorkloadType.CPU_INTENSIVE, WorkloadType.MEMORY_INTENSIVE,
+                          WorkloadType.IO_INTENSIVE]
+
         slice_id = random.randint(1, 1000)
         slice_name = f"test-slice-{slice_id}"
         user_profile = random.choice(user_profiles)
         workload_type = random.choice(workload_types)
-        
+
         # Crear respuesta
         response_data = {
             "slice_id": slice_id,
@@ -1515,7 +1611,7 @@ def get_test_data():
             "workload_type": workload_type,
             "virtual_machines": test_data["virtual_machines"]
         }
-        
+
         Logger.success(f"Datos de prueba para Slice Placement generados con éxito!")
         Logger.info(f"Slice: {slice_name}, Perfil: {user_profile}, Workload: {workload_type}, VMs: {num_vms}")
 
@@ -1524,7 +1620,7 @@ def get_test_data():
             "message": "Datos de prueba generados correctamente",
             "content": response_data
         }), 200
-        
+
     except Exception as e:
         Logger.error(f"Error generando datos de prueba: {str(e)}")
         return jsonify({
@@ -1533,12 +1629,13 @@ def get_test_data():
             "details": str(e)
         }), 500
 
+
 # ===================== SERVER =====================
 if __name__ == '__main__':
-    
+
     try:
         Logger.major_section("INICIANDO VM PLACEMENT")
-        
+
         # 1. Inicializar componentes
         Logger.info("Inicializando componentes del sistema...")
 
@@ -1547,38 +1644,32 @@ if __name__ == '__main__':
         try:
             # Inicializar pool de conexiones
             DatabaseManager.init_pool()
-            Logger.success("✅ Conexión a base de datos establecida")
+            Logger.success("Conexión a base de datos establecida")
         except Exception as db_error:
-            Logger.error(f"❌ Error al conectar con la base de datos: {str(db_error)}")
-            Logger.warning("⚠️ El servicio continuará pero algunas funcionalidades pueden no estar disponibles")
+            Logger.error(f"Error al conectar con la base de datos: {str(db_error)}")
+            Logger.warning("El servicio continuará pero algunas funcionalidades pueden no estar disponibles")
 
-        # Verificar conexión con Prometheus
-        prometheus_ok = verificar_conexion_prometheus()
-        if not prometheus_ok:
-            Logger.warning("⚠️ El servicio continuará pero las métricas de Prometheus no estarán disponibles")
-        
         # 2. Mostrar datos de ejemplo (misma semilla uwu)
         try:
             example_data = DataManager.generate_test_data(num_vms=5, num_servers=0, seed=69)
             example = json.loads(example_data)
             vm_data = {"virtual_machines": example["virtual_machines"]}
-            
+
             Logger.info("Ejemplo de payload para el endpoint /placement:")
             Logger.info(json.dumps(vm_data, indent=2))
-            
+
         except Exception as example_error:
             Logger.warning(f"No se pudieron generar datos de ejemplo: {str(example_error)}")
-        
+
         # 3. Iniciar servidor Flask
         Logger.section("INICIANDO SERVIDOR WEB")
-        Logger.info("⚙️ Configuración del servidor:")
-        Logger.info(f"   Host: {host}")
-        Logger.info(f"   Puerto: {port}")
-        Logger.info(f"   Debug: {debug}")
-        Logger.info(f"   Prometheus: {PROMETHEUS_URL}")
+        Logger.info("Configuración del servidor:")
+        Logger.info(f"- Host: {host}")
+        Logger.info(f"- Puerto: {port}")
+        Logger.info(f"- Debug: {debug}")
 
         Logger.debug("Iniciando servidor Flask...")
-        Logger.success(f"🚀 VM Placement listo para recibir conexiones en Eureka")
+        Logger.success(f"VM Placement listo para recibir conexiones en Eureka")
 
         # Iniciar servidor Flask
         app.run(
@@ -1586,9 +1677,10 @@ if __name__ == '__main__':
             port=port,
             debug=debug
         )
-        
+
     except Exception as e:
         Logger.error(f"Error iniciando el servidor: {str(e)}")
         Logger.debug(f"Traceback: {traceback.format_exc()}")
         import sys
+
         sys.exit(1)
