@@ -72,7 +72,7 @@ import mysql.connector
 from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
-PROMETHEUS_URL = "http://localhost:9090"  # cambia según tu entorno
+PROMETHEUS_URL = "http://10.20.12.98:9090"  # cambia según tu entorno
 # eureka
 from py_eureka_client import eureka_client
 from itertools import combinations
@@ -84,7 +84,7 @@ port = 6001
 debug = False
 
 # ===================== CONFIGURACIÓN DE EUREKA =====================
-eureka_server = "http://localhost:8761"
+eureka_server = "http://10.20.12.214:8080"
 
 # Configuración de Eureka
 eureka_client.init(
@@ -123,10 +123,10 @@ def get_service_instance(service_name: str) -> dict:
 
 # ===================== CONFIGURACIÓN BD =====================
 DB_CONFIG = {
-    "host": "localhost",
+    "host": "10.20.12.214",
     "user": "root",
-    "password": "root",
-    "port": 3306,
+    "password": "Branko",
+    "port": 4000,
     "database": "cloud_v3"
 }
 
