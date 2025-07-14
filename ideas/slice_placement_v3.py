@@ -73,12 +73,53 @@ from mysql.connector import pooling
 # Acceso a Prometheus
 import requests
 PROMETHEUS_URL = "http://localhost:9090"  # cambia según tu entorno
+# eureka
+from py_eureka_client import eureka_client
+from itertools import combinations
 
 # ===================== CONFIGURACIÓN DE FLASK =====================
 app = Flask(__name__)
 host = '0.0.0.0'
 port = 6001
 debug = False
+
+# ===================== CONFIGURACIÓN DE EUREKA =====================
+eureka_server = "http://localhost:8761"
+
+# Configuración de Eureka
+eureka_client.init(
+    eureka_server=eureka_server,
+    app_name="vm-placement",
+    instance_port=port,
+    instance_host="localhost",
+    renewal_interval_in_secs=30,
+    duration_in_secs=90,
+)
+
+def get_service_instance(service_name: str) -> dict:
+    """
+    Obtiene información de la instancia de un servicio registrado en Eureka.
+    """
+    try:
+        Logger.debug(f"Buscando instancia de servicio: {service_name}")
+        instance = eureka_client.get_client().applications.get_application(service_name)
+        if not instance or not instance.up_instances:
+            Logger.error(f"Servicio {service_name} no encontrado en Eureka")
+            return None
+
+        instance = instance.up_instances[0]
+        service_info = {
+            'ipAddr': instance.ipAddr,
+            'port': instance.port.port,
+            'hostName': instance.hostName
+        }
+
+        Logger.debug(f"Instancia encontrada: {json.dumps(service_info, indent=2)}")
+        return service_info
+
+    except Exception as e:
+        Logger.error(f"Error obteniendo instancia de {service_name}: {str(e)}")
+        return None
 
 # ===================== CONFIGURACIÓN BD =====================
 DB_CONFIG = {
@@ -674,16 +715,18 @@ class Slice:
         # 4. Score ponderado final
         score = 0.6 * f_cong + 0.4 * f_queue
         return round(score, 4)
-    
-    def score_servidores(self, servidores: List[PhysicalServer]) -> Tuple[Optional[PhysicalServer], float]:
+
+    def score_servidores(self, servidores: List[PhysicalServer]) -> List[Tuple[PhysicalServer, float]]:
         """
-        Selecciona el mejor servidor (máximo score ponderado) para un slice.
+        Evalúa todos los servidores y devuelve una lista de tuplas (servidor, score).
+
         Parámetros:
-        - servidores: lista de servidores con claves 'vcpu', 'used_vcpus', etc.
+        - servidores: lista de servidores físicos
+
         Retorna:
-        - Lista de tuplas [tupla:(mejor_servidor_dict, score)]
+        - Lista de tuplas (servidor, score)
         """
-        lista_tupla_servidor_score = [] #Lista de tuplas (server,score)
+        lista_tupla_servidor_score = []
 
         for server in servidores:
             # Calculamos el score del slice en el server
@@ -691,12 +734,13 @@ class Slice:
             Logger.info(f"{server.name}, score: {score}")
             tupla_server_score = (server, score)
             lista_tupla_servidor_score.append(tupla_server_score)
+
         return lista_tupla_servidor_score
-    
+
     def get_resource_weights(self) -> Dict[str, float]:
         """Obtiene pesos relativos para cada tipo de recurso según el workload"""
         return WorkloadType.get_resource_weights(self.workload_type)
-    
+
     def aplicar_fase_2_greedy(self, servidores: List[PhysicalServer]) -> Dict[str, Any]:
         """
         FASE 2: Algoritmo greedy para distribución de slice en múltiples servidores
@@ -1271,90 +1315,257 @@ def health_check():
         "timestamp": datetime.now().isoformat()
     }), 200
 
+
 @app.route('/slice_placement_v3', methods=['POST'])
 def slice_placement_v3():
     try:
+        Logger.major_section("API: VM PLACEMENT REQUEST")
         data = request.get_json()
-        # 1. Validar entrada mínima, se agrega ZA: LOW TIER, PREMIUM, VIP, parámetros de slice básicos: ID y NAME, USUARIO
-        required_fields = ["slice_id", "slice_name", "user_profile", "availability_zone", "workload_type", "virtual_machines"] 
+
+        # 1. Validar entrada
+        required_fields = ["slice_id", "slice_name", "user_profile", "availability_zone", "workload_type",
+                           "virtual_machines"]
         if not all(field in data for field in required_fields):
-            return jsonify({"status": "error", "message": "Faltan campos requeridos"}), 400
+            return jsonify({
+                "status": "fail",
+                "message": "Faltan campos requeridos",
+                "slice_id": data.get("slice_id"),
+                "slice_name": data.get("slice_name"),
+                "servers_info": []
+            }), 400
+
         # 2. Crear VMs
         vms = []
         for vm_data in data["virtual_machines"]:
             if "id" not in vm_data or "name" not in vm_data or "flavor_id" not in vm_data:
-                return jsonify({"status": "error", "message": "Formato de VM incorrecto"}), 400
-            # Buscar el flavor correspondiente (esto debería venir de BD en entorno real)
-            flavor = Flavor.get_by_id(vm_data["flavor_id"])  # Debes tener esta función implementada
+                return jsonify({
+                    "status": "fail",
+                    "message": "Formato de VM incorrecto",
+                    "slice_id": data.get("slice_id"),
+                    "slice_name": data.get("slice_name"),
+                    "servers_info": []
+                }), 400
+
+            # Buscar el flavor correspondiente
+            flavor = Flavor.get_by_id(vm_data["flavor_id"])
             if not flavor:
-                return jsonify({"status": "error", "message": f"Flavor ID {vm_data['flavor_id']} no encontrado"}), 404
+                return jsonify({
+                    "status": "fail",
+                    "message": f"Flavor ID {vm_data['flavor_id']} no encontrado",
+                    "slice_id": data.get("slice_id"),
+                    "slice_name": data.get("slice_name"),
+                    "servers_info": []
+                }), 400
 
             vm = VirtualMachine(id=vm_data["id"], name=vm_data["name"], flavor=flavor)
             vms.append(vm)
+
         # 3. Construir el Slice
         slice_obj = Slice(
-            id=data["slice_id"], 
-            name=data["slice_name"], 
-            vms=vms, #Lista de VMs
+            id=data["slice_id"],
+            name=data["slice_name"],
+            vms=vms,
             user_profile=data["user_profile"].lower(),
             workload_type=data["workload_type"].lower()
         )
-        
+
         # 4. Obtener servidores físicos
         _, servidores = DataManager.load_from_database()
         if not servidores:
-            return jsonify({"status": "error", "message": "No hay servidores disponibles"}), 500
-        print(f"TODOS LOS SERVIDORES: {servidores}")
-        
-        # 4.1 Filtrar servidores por ZA
-        zona_requerida_id  = int(data["availability_zone"]) #Se manda en base al ID de la ZA
-        Logger.section(f"Filtrando servidores en la zona: {zona_requerida_id}")
-        servidores_zona_requerida = [srv for srv in servidores if srv.availability_zone == zona_requerida_id]
-        if not servidores_zona_requerida:
-            return jsonify({"status": "fail", "message": f"No hay servidores disponibles en la zona ID {zona_requerida_id}"}), 200
-        # 5. Resolver placement
-        lista_tupla_servidor_score = slice_obj.score_servidores(servidores_zona_requerida) #Se evalúan solo los servidores_zona_requerida
-        for tupla_servidor_score in lista_tupla_servidor_score:
-            print(f"Servidor: {tupla_servidor_score[0].name}, score: {tupla_servidor_score[1]}")
-        
-        # Validar si la lista está vacía o si todos los scores son 0.0
-        if not lista_tupla_servidor_score or all(score == 0.0 for _, score in lista_tupla_servidor_score):
-            Logger.failed("Ningún servidor puede alojar el slice")
-            #Se debe aplicar lógica de FASE 2, se debe sacar la VM más pequeña (mayor probabilidad de instanciarse en otro server)
-            #y luego generar el "mini-slice" con esa vm menos e intentar el score en los servers según su ZA y que la otra VM
-            #se instancie en otro server, considerándola como "mini-slice" y haciendo de score para el caso de ZA=PREMIUM
-            """Logger.warning("Ningún servidor puede alojar el slice. Iniciando FASE 2...")
-            resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores)
-
-            if resultado_fase2["status"] == "success":
-                return jsonify(resultado_fase2), 200
-            else:
-                return jsonify(resultado_fase2), 200"""
-            
-            return jsonify({"status": "fail", "message": "Ningún servidor puede alojar el slice"}), 200
-        else:
-            #Escoger best_server y best_score
-            best_server, best_score = max(lista_tupla_servidor_score, key=lambda x: x[1])
-            #Se debe actualizar Base de datos con los mu y sigma calculados de cada VM instanciada
-            stats_por_vm = slice_obj.lista_stats_vms
-            Logger.section("Estadísticas de uso por VM (μ y σ)")
-            print(stats_por_vm)
-            #Las stats también se las pasa al Driver correspondiente
-            #Json Response
             return jsonify({
-                "status": "success",
+                "status": "fail",
+                "message": "No hay servidores disponibles",
                 "slice_id": data["slice_id"],
                 "slice_name": data["slice_name"],
-                "asignado_a": best_server.name,
-                "server_id": best_server.id,
-                "server_ip": best_server.ip,
-                "score": best_score,
-                "stats_vms": stats_por_vm
+                "servers_info": []
+            }), 500
+
+        # 4.1 Filtrar servidores por zona de disponibilidad
+        zona_requerida_id = int(data["availability_zone"])
+        Logger.section(f"Filtrando servidores en la zona: {zona_requerida_id}")
+        servidores_zona_requerida = [srv for srv in servidores if srv.availability_zone == zona_requerida_id]
+
+        if not servidores_zona_requerida:
+            return jsonify({
+                "status": "fail",
+                "message": f"No hay servidores disponibles en la zona ID {zona_requerida_id}",
+                "slice_id": data["slice_id"],
+                "slice_name": data["slice_name"],
+                "availability_zone": zona_requerida_id,
+                "servers_info": []
             }), 200
-        
-        
+
+        # 5. FASE 1: Intentar colocar slice completo en un servidor
+        Logger.section("FASE 1: Intentando colocación en servidor único")
+        lista_tupla_servidor_score = slice_obj.score_servidores(servidores_zona_requerida)
+
+        # Encontrar el mejor servidor
+        best_server = None
+        best_score = 0.0
+
+        for servidor, score in lista_tupla_servidor_score:
+            Logger.debug(f"Servidor: {servidor.name}, score: {score}")
+            if score > best_score:
+                best_score = score
+                best_server = servidor
+
+        # 6. Generar respuesta según resultado de FASE 1
+        if best_server and best_score > 0:
+            Logger.success(f"FASE 1 exitosa: Slice asignado a {best_server.name}")
+
+            # Obtener estadísticas de las VMs
+            stats_por_vm = slice_obj.lista_stats_vms
+
+            # Obtener capacidades del servidor
+            capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(best_server.id)
+
+            # Formato de respuesta exitosa
+            vms_response = []
+            for i, vm in enumerate(slice_obj.vms):
+                vm_stats = stats_por_vm[i]
+                vms_response.append({
+                    "vm_id": vm.id,
+                    "vm_name": vm.name,
+                    "mu_vcpu_used": vm_stats["cpu"][0],
+                    "mu_ram_used": vm_stats["ram"][0],
+                    "mu_disk_used": vm_stats["disk"][0],
+                    "desv_vcpu_used": vm_stats["cpu"][1],
+                    "desv_ram_used": vm_stats["ram"][1],
+                    "desv_disk_used": vm_stats["disk"][1]
+                })
+
+            return jsonify({
+                "status": "success",
+                "assignments": [
+                    {
+                        "server_id": best_server.id,
+                        "server_name": best_server.name,
+                        "server_ip": best_server.ip,
+                        "current_usage": {
+                            "vcpus": best_server.used_vcpus,
+                            "ram": best_server.used_ram,
+                            "disk": best_server.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        },
+                        "vms": vms_response
+                    }
+                ]
+            }), 200
+
+        else:
+            Logger.warning("FASE 1 falló: Intentando FASE 2...")
+
+            # FASE 2: Distribución en múltiples servidores
+            resultado_fase2 = slice_obj.aplicar_fase_2_greedy(servidores_zona_requerida)
+
+            if resultado_fase2["status"] == "success":
+                # Convertir resultado de FASE 2 al formato unificado
+                assignments = []
+                for asignacion in resultado_fase2["asignaciones"]:
+                    servidor_id = asignacion["server_id"]
+                    servidor = next(s for s in servidores_zona_requerida if s.id == servidor_id)
+
+                    # Obtener capacidades del servidor
+                    capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(
+                        servidor.id)
+
+                    # Preparar VMs response
+                    vms_response = []
+                    for vm_info in asignacion["vms"]:
+                        # Encontrar la VM original para obtener sus stats
+                        vm_original = next(vm for vm in slice_obj.vms if vm.id == vm_info["id"])
+                        vm_stats = vm_original.calcular_estadisticas_de_uso(slice_obj.user_profile)
+
+                        vms_response.append({
+                            "vm_id": vm_info["id"],
+                            "vm_name": vm_info["name"],
+                            "mu_vcpu_used": vm_stats["cpu"][0],
+                            "mu_ram_used": vm_stats["ram"][0],
+                            "mu_disk_used": vm_stats["disk"][0],
+                            "desv_vcpu_used": vm_stats["cpu"][1],
+                            "desv_ram_used": vm_stats["ram"][1],
+                            "desv_disk_used": vm_stats["disk"][1]
+                        })
+
+                    assignments.append({
+                        "server_id": servidor.id,
+                        "server_name": servidor.name,
+                        "server_ip": servidor.ip,
+                        "current_usage": {
+                            "vcpus": servidor.used_vcpus,
+                            "ram": servidor.used_ram,
+                            "disk": servidor.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        },
+                        "vms": vms_response
+                    })
+
+                return jsonify({
+                    "status": "success",
+                    "assignments": assignments
+                }), 200
+
+            else:
+                # Tanto FASE 1 como FASE 2 fallaron
+                Logger.error("Ambas fases fallaron")
+
+                # Obtener información de todos los servidores evaluados
+                servers_info = []
+                for servidor in servidores_zona_requerida:
+                    capacidades_asignadas = DatabaseManager.calcular_capacidad_asignada_con_modelo_compuesto(
+                        servidor.id)
+                    servers_info.append({
+                        "server_id": servidor.id,
+                        "server_name": servidor.name,
+                        "server_ip": servidor.ip,
+                        "current_usage": {
+                            "vcpus": servidor.used_vcpus,
+                            "ram": servidor.used_ram,
+                            "disk": servidor.used_disk
+                        },
+                        "current_assigned_capacity": {
+                            "mu_cpu": capacidades_asignadas["mu_cpu"],
+                            "sigma_cpu": capacidades_asignadas["sigma_cpu"],
+                            "mu_ram": capacidades_asignadas["mu_ram"],
+                            "sigma_ram": capacidades_asignadas["sigma_ram"],
+                            "mu_disk": capacidades_asignadas["mu_disk"],
+                            "sigma_disk": capacidades_asignadas["sigma_disk"]
+                        }
+                    })
+
+                return jsonify({
+                    "status": "fail",
+                    "message": "No se puede colocar el slice en ningún servidor disponible en la zona de disponibilidad",
+                    "slice_id": data["slice_id"],
+                    "slice_name": data["slice_name"],
+                    "availability_zone": zona_requerida_id,
+                    "servers_info": servers_info
+                }), 200
+
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        Logger.error(f"Error en VM Placement: {str(e)}")
+        Logger.debug(f"Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "status": "fail",
+            "message": f"Error interno: {str(e)}",
+            "slice_id": data.get("slice_id") if 'data' in locals() else None,
+            "slice_name": data.get("slice_name") if 'data' in locals() else None,
+            "servers_info": []
+        }), 500
 
 @app.route('/test-data', methods=['GET'])
 def get_test_data():
@@ -1443,8 +1654,8 @@ if __name__ == '__main__':
         Logger.info(f"- Debug: {debug}")
         
         Logger.debug("Iniciando servidor Flask...")
-        Logger.success(f"VM Placement listo para recibir conexiones")
-        
+        Logger.success(f"VM Placement listo para recibir conexiones en Eureka")
+
         # Iniciar servidor Flask
         app.run(
             host=host,
